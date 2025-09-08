@@ -33,7 +33,8 @@ class SettingsManager:
             "google_drive": {
                 "enabled": False,
                 "folder_id": "",
-                "authenticated": False
+                "authenticated": False,
+                "output_format": "opus"  # Output format: wav, mp3, opus
             },
             "export_directory": downloads_path,
             "session_title": "",
@@ -217,12 +218,57 @@ class SettingsManager:
         """Set window geometry setting"""
         return self.set_setting("window_geometry", geometry)
     
+    def get_google_drive_enabled(self) -> bool:
+        """Get Google Drive enabled setting"""
+        drive_settings = self.get_setting("google_drive", {})
+        return drive_settings.get("enabled", False)
+    
+    def set_google_drive_enabled(self, enabled: bool) -> bool:
+        """Set Google Drive enabled setting"""
+        drive_settings = self.get_setting("google_drive", {})
+        drive_settings["enabled"] = enabled
+        return self.set_setting("google_drive", drive_settings)
+    
+    def get_google_drive_folder_id(self) -> str:
+        """Get Google Drive folder ID setting"""
+        drive_settings = self.get_setting("google_drive", {})
+        return drive_settings.get("folder_id", "")
+    
+    def set_google_drive_folder_id(self, folder_id: str) -> bool:
+        """Set Google Drive folder ID setting"""
+        drive_settings = self.get_setting("google_drive", {})
+        drive_settings["folder_id"] = folder_id
+        return self.set_setting("google_drive", drive_settings)
+    
+    def get_google_drive_authenticated(self) -> bool:
+        """Get Google Drive authenticated setting"""
+        drive_settings = self.get_setting("google_drive", {})
+        return drive_settings.get("authenticated", False)
+    
+    def set_google_drive_authenticated(self, authenticated: bool) -> bool:
+        """Set Google Drive authenticated setting"""
+        drive_settings = self.get_setting("google_drive", {})
+        drive_settings["authenticated"] = authenticated
+        return self.set_setting("google_drive", drive_settings)
+    
+    def get_google_drive_output_format(self) -> str:
+        """Get Google Drive output format setting"""
+        drive_settings = self.get_setting("google_drive", {})
+        return drive_settings.get("output_format", "opus")
+    
+    def set_google_drive_output_format(self, output_format: str) -> bool:
+        """Set Google Drive output format setting"""
+        drive_settings = self.get_setting("google_drive", {})
+        drive_settings["output_format"] = output_format
+        return self.set_setting("google_drive", drive_settings)
+    
     def clear_google_drive_settings(self) -> bool:
         """Clear all Google Drive settings"""
         return self.set_setting("google_drive", {
             "enabled": False,
             "folder_id": "",
-            "authenticated": False
+            "authenticated": False,
+            "output_format": "opus"
         })
     
     def get_all_settings(self) -> Dict[str, Any]:

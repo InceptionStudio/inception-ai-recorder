@@ -359,6 +359,28 @@ class ConfigurationDialog:
                              font=('Arial', 8), foreground='gray')
         help_text.pack(anchor=tk.W, pady=(10, 0))
         
+        # Output format selection
+        format_frame = ttk.Frame(drive_frame)
+        format_frame.pack(anchor=tk.W, pady=(10, 0))
+        
+        ttk.Label(format_frame, text="Output format:").pack(side=tk.LEFT)
+        
+        self.output_format_var = tk.StringVar()
+        self.output_format_combo = ttk.Combobox(
+            format_frame,
+            textvariable=self.output_format_var,
+            values=["wav", "mp3", "opus"],
+            state="readonly",
+            width=10
+        )
+        self.output_format_combo.pack(side=tk.LEFT, padx=(5, 0))
+        self.output_format_combo.bind('<<ComboboxSelected>>', self.on_output_format_changed)
+        
+        # Format description
+        self.format_description = ttk.Label(format_frame, text="(WAV: uncompressed, MP3: compressed, Opus: highly compressed)", 
+                                          font=('Arial', 8), foreground='gray')
+        self.format_description.pack(side=tk.LEFT, padx=(10, 0))
+        
         # Buttons frame
         buttons_frame = ttk.Frame(main_frame)
         buttons_frame.pack(fill=tk.X, pady=(20, 0))
@@ -379,6 +401,7 @@ class ConfigurationDialog:
             
             # Load Google Drive settings
             self.drive_enabled_var.set(self.settings_manager.get_google_drive_enabled())
+            self.output_format_var.set(self.settings_manager.get_google_drive_output_format())
             
             folder_id = self.settings_manager.get_google_drive_folder_id()
             if folder_id:
@@ -411,6 +434,17 @@ class ConfigurationDialog:
         self.auth_button.config(state=state)
         self.validate_folder_button.config(state=state)
         self.clear_auth_button.config(state=state)
+        
+        # Also enable/disable output format dropdown
+        self.output_format_combo.config(state=state)
+    
+    def on_output_format_changed(self, event=None):
+        """Handle output format dropdown change"""
+        output_format = self.output_format_var.get()
+        
+        # Only update audio manager if not during initialization
+        if not self._initializing:
+            self.audio_manager.set_google_drive_output_format(output_format)
     
     def on_folder_id_changed(self, event=None):
         """Handle Google Drive folder ID change"""

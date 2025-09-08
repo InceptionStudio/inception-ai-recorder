@@ -308,9 +308,9 @@ class AudioManager:
         self.__waveform_callback: Optional[Callable[[str, List[float]], None]] = None
         
         # Listening settings
-        self.__sample_rate = 44100
+        self.__sample_rate = 48000
         self.__channels = 1
-        self.__sample_format = pyaudio.paInt16
+        self.__sample_format = pyaudio.paFloat32
         self.__chunk_size = 1024
         
         # Device labels
@@ -437,6 +437,7 @@ class AudioManager:
                 # Only include input devices
                 if device_info['maxInputChannels'] > 0:
                     host_api_info = self.__audio.get_host_api_info_by_index(device_info['hostApi'])
+                    print(f"🎤 {host_api_info['name']} Input Device Found: {device_info}")
                     
                     device = AudioDevice(
                         id=str(i),
@@ -856,7 +857,7 @@ class AudioManager:
                     print(f"Audio callback status: {status}")
                 
                 # Copy bytes into a new numpy array
-                audio_data = np.frombuffer(in_data, dtype=np.int16).copy()
+                audio_data = np.frombuffer(in_data, dtype=np.float32).copy()
                 
                 # Enqueue all other operations in a background thread, so we can return immediately.
                 def _bg_audio_callback_ops():
@@ -983,7 +984,7 @@ class AudioManager:
     def stop_all_streams(self):
         with self._lock:
             self.__stop_all_streams()
-            
+
     def __stop_all_streams(self):
         """Stop all active streams"""
         if not self.__listening_streams:
@@ -1056,7 +1057,7 @@ class AudioManager:
                     # Create WAV file
                     wav_file = wave.open(str(filepath), 'wb')
                     wav_file.setnchannels(self.__channels)
-                    wav_file.setsampwidth(2)  # 16-bit
+                    wav_file.setsampwidth(4)  # 32-bit float
                     wav_file.setframerate(self.__sample_rate)
                     
                     self.__recording_files[device_id] = wav_file
@@ -1118,7 +1119,12 @@ class AudioManager:
             # Get the session folder name (without path)
             session_folder_name = session_folder.name
             
+            # Get output format setting
+            output_format = self.get_google_drive_output_format()
+            
             print(f"📤 Uploading {len(wav_files)} files from session folder '{session_folder_name}' to Google Drive...")
+            if output_format != 'wav':
+                print(f"🎵 {output_format.upper()} conversion enabled - files will be converted before upload")
             
             # Upload files in a background thread to avoid blocking
             def upload_task():
@@ -1129,9 +1135,25 @@ class AudioManager:
                     print("❌ Failed to create session folder in Google Drive")
                     return
                 
+                # Prepare files for upload (convert to target format if needed)
+                files_to_upload = []
+                
+                for wav_file in wav_files:
+                    if output_format != 'wav':
+                        # Convert WAV to target format
+                        converted_file_path = self.convert_wav_to_format(str(wav_file), output_format)
+                        if converted_file_path:
+                            files_to_upload.append(converted_file_path)
+                        else:
+                            # Fallback to WAV if conversion failed
+                            print(f"⚠️ {output_format.upper()} conversion failed for {wav_file}, uploading WAV instead")
+                            files_to_upload.append(str(wav_file))
+                    else:
+                        files_to_upload.append(str(wav_file))
+                
                 # Upload files to the session folder
                 results = self.__drive_uploader.upload_files(
-                    [str(f) for f in wav_files], 
+                    files_to_upload, 
                     parent_folder_id=drive_session_folder_id,
                     settings_manager=self.__settings_manager
                 )
@@ -1178,8 +1200,8 @@ class AudioManager:
                 
                 # Track peak levels (before gain adjustment)
                 if not self.__shutting_down:
-                    # Calculate peak level in this chunk
-                    chunk_peak = np.max(np.abs(audio_data.astype(np.float32))) / 32767.0
+                    # Calculate peak level in this chunk (audio_data is already float32)
+                    chunk_peak = np.max(np.abs(audio_data))
                     
                     # Update peak tracking
                     with self._lock:
@@ -1199,8 +1221,8 @@ class AudioManager:
                 if gain_db != 0.0:
                     # Convert dB to linear gain
                     gain_linear = 10.0 ** (gain_db / 20.0)
-                    # Apply gain and clip to prevent overflow
-                    audio_data = np.clip(audio_data.astype(np.float32) * gain_linear, -32767, 32767).astype(np.int16)
+                    # Apply gain and clip to prevent overflow (audio_data is already float32)
+                    audio_data = np.clip(audio_data * gain_linear, -1.0, 1.0)
                 
                 # Process callbacks
                 level_cb = None
@@ -1211,9 +1233,9 @@ class AudioManager:
                         waveform_cb = self.__waveform_callback
 
                 if level_cb and not self.__shutting_down:
-                    # Calculate RMS level (normalize int16 to 0-1 range)
-                    rms = np.sqrt(np.mean(audio_data.astype(np.float32)**2))
-                    scaled_rms = min(1.0, rms / 32767.0)  # Normalize by max int16 value
+                    # Calculate RMS level (audio_data is already float32 normalized to -1.0 to 1.0)
+                    rms = np.sqrt(np.mean(audio_data**2))
+                    scaled_rms = min(1.0, rms)
 
                     # Only submit to thread pool if not shutting down
                     if not self.__shutting_down:
@@ -1230,16 +1252,14 @@ class AudioManager:
                         except RuntimeError:
                             # Thread pool is shut down, ignore the error
                             pass
-                else:
-                    print(f"BGThread({device_id}): No level callback")
 
                 if waveform_cb and not self.__shutting_down:
                     # Update waveform data (downsample for display)
                     downsample_factor = max(1, len(audio_data) // 100)
                     downsampled = audio_data[::downsample_factor]
 
-                    # Scale int16 to -1.0 to 1.0 range for display
-                    scaled_waveform = np.clip(downsampled.astype(np.float32) / 32767.0, -1.0, 1.0).tolist()
+                    # Scale to -1.0 to 1.0 range for display
+                    scaled_waveform = downsampled.tolist()
 
                     # Only submit to thread pool if not shutting down
                     if not self.__shutting_down:
@@ -1256,12 +1276,12 @@ class AudioManager:
                         except RuntimeError:
                             # Thread pool is shut down, ignore the error
                             pass
-                else:
-                    print(f"BGThread({device_id}): No waveform callback")
 
                 if wav_file is not None:
-                    # Write int16 audio_data to WAV file
-                    wav_file.writeframes(audio_data.tobytes())
+                    # Convert float32 audio_data to 32-bit int for WAV file
+                    # Scale float32 (-1.0 to 1.0) to int32 range
+                    int32_data = (audio_data * 2147483647).astype(np.int32)
+                    wav_file.writeframes(int32_data.tobytes())
 
             except queue.Empty:
                 continue  # No data available, keep trying
@@ -1316,3 +1336,103 @@ class AudioManager:
             print("✅ AudioManager cleanup completed")
         except Exception as e:
             print(f"Error terminating PyAudio: {e}")
+    
+    def convert_wav_to_format(self, wav_file_path: str, output_format: str, output_file_path: str = None, bitrate: int = 128) -> Optional[str]:
+        """Convert WAV file to specified format using ffmpeg
+        
+        Args:
+            wav_file_path: Path to the input WAV file
+            output_format: Target format (wav, mp3, opus)
+            output_file_path: Path for the output file (optional, defaults to same name with new extension)
+            bitrate: Audio bitrate in kbps (default: 128)
+            
+        Returns:
+            Path to the converted file if successful, None if failed
+        """
+        try:
+            # Generate output file path if not provided
+            if output_file_path is None:
+                wav_path = Path(wav_file_path)
+                output_file_path = str(wav_path.with_suffix(f'.{output_format}'))
+            
+            # If output format is WAV, no conversion needed
+            if output_format.lower() == 'wav':
+                return wav_file_path
+            
+            print(f"🔄 Converting {wav_file_path} to {output_format.upper()}...")
+            
+            # Use ffmpeg to convert WAV to target format
+            import subprocess
+            
+            cmd = ['ffmpeg', '-i', wav_file_path, '-y']  # -y overwrites output file
+            
+            # Add format-specific parameters
+            if output_format.lower() == 'mp3':
+                cmd.extend(['-codec:a', 'libmp3lame', '-b:a', f'{bitrate}k'])
+            elif output_format.lower() == 'opus':
+                cmd.extend(['-codec:a', 'libopus', '-b:a', f'{bitrate}k'])
+            else:
+                print(f"❌ Unsupported output format: {output_format}")
+                return None
+            
+            cmd.append(output_file_path)
+            
+            # Run ffmpeg conversion
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print(f"❌ ffmpeg conversion failed: {result.stderr}")
+                return None
+            
+            # Get file sizes for comparison
+            wav_size = os.path.getsize(wav_file_path)
+            output_size = os.path.getsize(output_file_path)
+            compression_ratio = (wav_size - output_size) / wav_size * 100
+            
+            print(f"✅ {output_format.upper()} conversion completed: {output_file_path}")
+            print(f"   WAV: {wav_size:,} bytes → {output_format.upper()}: {output_size:,} bytes ({compression_ratio:.1f}% smaller)")
+            
+            return output_file_path
+            
+        except Exception as e:
+            print(f"❌ Error converting WAV to {output_format.upper()}: {e}")
+            return None
+    
+    # Google Drive Settings Methods
+    def set_google_drive_enabled(self, enabled: bool):
+        """Set Google Drive upload enabled"""
+        self.__settings_manager.set_google_drive_enabled(enabled)
+    
+    def get_google_drive_enabled(self) -> bool:
+        """Get Google Drive upload enabled"""
+        return self.__settings_manager.get_google_drive_enabled()
+    
+    def set_google_drive_folder_id(self, folder_id: str):
+        """Set Google Drive folder ID"""
+        self.__settings_manager.set_google_drive_folder_id(folder_id)
+    
+    def get_google_drive_folder_id(self) -> str:
+        """Get Google Drive folder ID"""
+        return self.__settings_manager.get_google_drive_folder_id()
+    
+    def set_google_drive_output_format(self, output_format: str):
+        """Set Google Drive output format"""
+        self.__settings_manager.set_google_drive_output_format(output_format)
+    
+    def get_google_drive_output_format(self) -> str:
+        """Get Google Drive output format"""
+        return self.__settings_manager.get_google_drive_output_format()
+    
+    def is_google_drive_authenticated(self) -> bool:
+        """Check if Google Drive is authenticated"""
+        return self.__settings_manager.get_google_drive_authenticated()
+    
+    def validate_google_drive_folder_id(self, folder_id: str) -> tuple[bool, str]:
+        """Validate Google Drive folder ID"""
+        # TODO: Implement actual validation
+        return True, "Folder validation not implemented yet"
+    
+    def clear_google_drive_authentication(self):
+        """Clear Google Drive authentication"""
+        self.__settings_manager.set_google_drive_authenticated(False)
+        # TODO: Remove authentication tokens
