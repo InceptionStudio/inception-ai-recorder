@@ -21,7 +21,7 @@ from .settings_manager import SettingsManager
 @dataclass
 class AudioDevice:
     """Represents an audio input device"""
-    id: int
+    id: str
     name: str
     host_api: str
     max_input_channels: int
@@ -297,15 +297,15 @@ class AudioManager:
     def __init__(self, settings_manager: Optional[SettingsManager] = None):
         self.__audio = pyaudio.PyAudio()
         self.__input_devices: List[AudioDevice] = []
-        self.__selected_devices: Dict[int, bool] = {}
-        self.__listening_streams: Dict[int, pyaudio.Stream] = {}
-        self.__listening_threads: Dict[int, threading.Thread] = {}
-        self.__recording_files: Dict[int, wave.Wave_write] = {}
-        self.__audio_data_queues: Dict[int, queue.Queue] = {}
+        self.__selected_devices: Dict[str, bool] = {}
+        self.__listening_streams: Dict[str, pyaudio.Stream] = {}
+        self.__listening_threads: Dict[str, threading.Thread] = {}
+        self.__recording_files: Dict[str, wave.Wave_write] = {}
+        self.__audio_data_queues: Dict[str, queue.Queue] = {}
         
         # Callbacks for UI updates
-        self.__level_callback: Optional[Callable[[int, float], None]] = None
-        self.__waveform_callback: Optional[Callable[[int, List[float]], None]] = None
+        self.__level_callback: Optional[Callable[[str, float], None]] = None
+        self.__waveform_callback: Optional[Callable[[str, List[float]], None]] = None
         
         # Listening settings
         self.__sample_rate = 44100
@@ -314,15 +314,15 @@ class AudioManager:
         self.__chunk_size = 1024
         
         # Device labels
-        self.__device_labels: Dict[int, str] = {}
+        self.__device_labels: Dict[str, str] = {}
         
         # Device gain settings (in dB)
-        self.__device_gains: Dict[int, float] = {}
+        self.__device_gains: Dict[str, float] = {}
         
         # Peak level tracking for auto gain
-        self.__device_peak_levels: Dict[int, float] = {}  # Peak level (0.0 to 1.0)
-        self.__device_peak_counts: Dict[int, int] = {}    # How many times peak was hit
-        self.__device_sample_counts: Dict[int, int] = {}  # Total samples processed
+        self.__device_peak_levels: Dict[str, float] = {}  # Peak level (0.0 to 1.0)
+        self.__device_peak_counts: Dict[str, int] = {}    # How many times peak was hit
+        self.__device_sample_counts: Dict[str, int] = {}  # Total samples processed
         
         # Export directory
         self.__export_directory: Optional[Path] = None
@@ -348,6 +348,8 @@ class AudioManager:
         
         self.__load_input_devices()
         self.__load_settings()
+        self.__load_device_settings()
+        self.__load_selected_devices()
     
     def __load_settings(self):
         """Load settings from settings manager"""
@@ -367,16 +369,6 @@ class AudioManager:
             if session_title:
                 self.__session_title = session_title
             
-            # Load device labels
-            for device in self.__input_devices:
-                label = self.__settings_manager.get_device_label(device.id)
-                if label:
-                    self.__device_labels[device.id] = label
-                
-                # Load device gains
-                gain = self.__settings_manager.get_device_gain(device.id)
-                self.__device_gains[device.id] = gain
-            
             # Load Google Drive settings
             self.__upload_to_drive = self.__settings_manager.get_google_drive_enabled()
             folder_id = self.__settings_manager.get_google_drive_folder_id()
@@ -395,6 +387,23 @@ class AudioManager:
         except Exception as e:
             print(f"❌ Error loading settings: {e}")
     
+    def __load_device_settings(self):
+        """Load device-specific settings (labels and gains) after remapping"""
+        try:
+            # Load device labels and gains after remapping has occurred
+            for device in self.__input_devices:
+                label = self.__settings_manager.get_device_label(device.id)
+                self.__device_labels[device.id] = label
+                
+                # Load device gains
+                gain = self.__settings_manager.get_device_gain(device.id)
+                self.__device_gains[device.id] = gain
+            
+            print("✅ Loaded device-specific settings")
+            
+        except Exception as e:
+            print(f"❌ Error loading device settings: {e}")
+    
     def __load_selected_devices(self):
         """Load selected devices from settings"""
         try:
@@ -403,7 +412,7 @@ class AudioManager:
                 if device_id in self.__selected_devices:
                     self.__selected_devices[device_id] = True
                     # Start the device stream
-                    self._start_device_stream(device_id)
+                    self.__start_device_stream(device_id)
         except Exception as e:
             print(f"❌ Error loading selected devices: {e}")
     
@@ -430,7 +439,7 @@ class AudioManager:
                     host_api_info = self.__audio.get_host_api_info_by_index(device_info['hostApi'])
                     
                     device = AudioDevice(
-                        id=i,
+                        id=str(i),
                         name=device_info['name'],
                         host_api=host_api_info['name'],
                         max_input_channels=device_info['maxInputChannels'],
@@ -439,7 +448,7 @@ class AudioManager:
                         default_sample_rate=device_info['defaultSampleRate']
                     )
                     self.__input_devices.append(device)
-                    self.__selected_devices[i] = False
+                    self.__selected_devices[str(i)] = False
                     # Initialize peak tracking for new device
                     self.__reset_device_peak_tracking(i)
                     
@@ -447,6 +456,12 @@ class AudioManager:
                 print(f"Error loading device {i}: {e}")
         
         print(f"Loaded {len(self.__input_devices)} input devices")
+        
+        # Create current device mapping and remap settings
+        current_devices = {}
+        for device in self.__input_devices:
+            current_devices[str(device.id)] = device.name
+        self.__settings_manager.remap_device_ids(current_devices)
     
     def refresh_devices(self):
         """Refresh the list of available devices"""
@@ -489,6 +504,12 @@ class AudioManager:
                 # Reload devices
                 self.__load_input_devices()
                 
+                # Reload device-specific settings after remapping
+                self.__load_device_settings()
+                
+                # Reload selected devices after remapping
+                self.__load_selected_devices()
+                
                 print("✅ Device refresh completed")
                 
             except Exception as e:
@@ -506,7 +527,7 @@ class AudioManager:
                 # Always clear the shutdown flag
                 self.__shutting_down = False
     
-    def __get_device_by_id(self, device_id: int) -> Optional[AudioDevice]:
+    def __get_device_by_id(self, device_id: str) -> Optional[AudioDevice]:
         """Get device by ID"""
         return next((device for device in self.__input_devices if device.id == device_id), None)
     
@@ -520,9 +541,8 @@ class AudioManager:
         with self._lock:
             return len(self.__input_devices)
     
-    def set_device_selected(self, device_id: int, selected: bool):
+    def set_device_selected(self, device_id: str, selected: bool):
         """Set device selection status"""
-        should_start = False
         should_stop = False
         
         with self._lock:
@@ -531,36 +551,33 @@ class AudioManager:
                 self.__selected_devices[device_id] = selected
                 
                 if selected and not was_selected:
-                    should_start = True
+                    self.__start_device_stream(device_id)
                 elif not selected and was_selected:
                     should_stop = True
                     # Reset peak tracking when device is deselected
                     self.__reset_device_peak_tracking(device_id)
+            # Save selected devices to settings
+            self.__save_selected_devices()
         
-        # Start or stop stream outside of lock to avoid deadlock
-        if should_start:
-            self._start_device_stream(device_id)
-        elif should_stop:
+        # Do it outside of lock so we can block until the thread disappears
+        if should_stop:
             self._stop_device_stream(device_id)
-        
-        # Save selected devices to settings
-        self.__save_selected_devices()
     
-    def is_device_selected(self, device_id: int) -> bool:
+    def is_device_selected(self, device_id: str) -> bool:
         """Check if device is selected"""
         with self._lock:
             return self.__selected_devices.get(device_id, False)
     
-    def get_selected_device_ids(self) -> List[int]:
+    def get_selected_device_ids(self) -> List[str]:
         """Get list of selected device IDs"""
         with self._lock:
             return self.__get_selected_device_ids()
     
-    def __get_selected_device_ids(self) -> List[int]:
+    def __get_selected_device_ids(self) -> List[str]:
         """Get list of selected device IDs"""
         return [device_id for device_id, selected in self.__selected_devices.items() if selected]
 
-    def set_device_label(self, device_id: int, label: str):
+    def set_device_label(self, device_id: str, label: str):
         """Set custom label for device"""
         with self._lock:
             self.__device_labels[device_id] = label
@@ -568,16 +585,16 @@ class AudioManager:
         # Save to settings
         self.__settings_manager.set_device_label(device_id, label)
     
-    def get_device_label(self, device_id: int) -> str:
+    def get_device_label(self, device_id: str) -> str:
         """Get custom label for device"""
         with self._lock:
             return self.__get_device_label(device_id)
     
-    def __get_device_label(self, device_id: int) -> str:
+    def __get_device_label(self, device_id: str) -> str:
         """Get custom label for device"""
         return self.__device_labels.get(device_id, "")
     
-    def clear_device_label(self, device_id: int):
+    def clear_device_label(self, device_id: str):
         """Clear custom label for device"""
         with self._lock:
             self.__device_labels.pop(device_id, None)
@@ -585,7 +602,7 @@ class AudioManager:
         # Save to settings
         self.__settings_manager.set_device_label(device_id, "")
     
-    def set_device_gain(self, device_id: int, gain_db: float):
+    def set_device_gain(self, device_id: str, gain_db: float):
         """Set gain for device in dB"""
         with self._lock:
             self.__device_gains[device_id] = gain_db
@@ -593,18 +610,18 @@ class AudioManager:
         # Save to settings
         self.__settings_manager.set_device_gain(device_id, gain_db)
     
-    def get_device_gain(self, device_id: int) -> float:
+    def get_device_gain(self, device_id: str) -> float:
         """Get gain for device in dB"""
         with self._lock:
             return self.__device_gains.get(device_id, 0.0)
     
-    def __reset_device_peak_tracking(self, device_id: int):
+    def __reset_device_peak_tracking(self, device_id: str):
         """Reset peak tracking for a device"""
         self.__device_peak_levels[device_id] = 0.0
         self.__device_peak_counts[device_id] = 0
         self.__device_sample_counts[device_id] = 0
     
-    def get_device_peak_info(self, device_id: int) -> tuple[float, int, int]:
+    def get_device_peak_info(self, device_id: str) -> tuple[float, int, int]:
         """Get peak tracking info: (peak_level, peak_count, sample_count)"""
         with self._lock:
             return (
@@ -613,7 +630,7 @@ class AudioManager:
                 self.__device_sample_counts.get(device_id, 0)
             )
     
-    def calculate_auto_gain(self, device_id: int) -> Optional[float]:
+    def calculate_auto_gain(self, device_id: str) -> Optional[float]:
         """Calculate optimal gain based on peak levels and clipping detection"""
         with self._lock:
             peak_level = self.__device_peak_levels.get(device_id, 0.0)
@@ -794,96 +811,109 @@ class AudioManager:
         with self._lock:
             return self.__is_recording
     
-    def set_level_callback(self, callback: Callable[[int, float], None]):
+    def set_level_callback(self, callback: Callable[[str, float], None]):
         """Set callback for audio level updates"""
         with self._lock:
             self.__level_callback = callback
     
-    def set_waveform_callback(self, callback: Callable[[int, List[float]], None]):
+    def set_waveform_callback(self, callback: Callable[[str, List[float]], None]):
         """Set callback for waveform data updates"""
         with self._lock:
             self.__waveform_callback = callback
     
-    def _start_device_stream(self, device_id: int):
+    def _start_device_stream(self, device_id: str):
         """Start audio stream for a device"""
         with self._lock:
-            if device_id in self.__listening_streams:
-                return
+            self.__start_device_stream(device_id)
+
+    def __start_device_stream(self, device_id: str):
+        """Start audio stream for a device"""
+        if device_id in self.__listening_streams:
+            return
+        
+        device = self.__get_device_by_id(device_id)
+        if not device:
+            return
+        
+        device_index = -1
+        try:
+            device_index = int(device_id)
+        except ValueError:
+            pass
+        if device_index < 0:
+            print(f"  ⚠️ Invalid device ID {device_id}")
+            return
+        
+        try:
+            # Create audio data queue for this device
+            self.__audio_data_queues[device_id] = queue.Queue()
             
-            device = self.__get_device_by_id(device_id)
-            if not device:
-                return
+            # Create callback function
+            def audio_callback(in_data, frame_count, time_info, status):
+                # This runs in a separate high-priority thread. Make sure it is highly
+                # efficient and there is no blocking code here.
+                if status:
+                    print(f"Audio callback status: {status}")
+                
+                # Copy bytes into a new numpy array
+                audio_data = np.frombuffer(in_data, dtype=np.int16).copy()
+                
+                # Enqueue all other operations in a background thread, so we can return immediately.
+                def _bg_audio_callback_ops():
+                    with self._lock:
+                        if not self.__shutting_down and device_id in self.__listening_streams:
+                            queue_ref = self.__audio_data_queues[device_id]
+                    
+                    # Queue audio data if needed (outside of lock to avoid deadlock)
+                    if queue_ref is not None:
+                        try:
+                            queue_ref.put_nowait(audio_data)
+                        except queue.Full:
+                            pass  # Drop data if queue is full
+
+                # Only submit to thread pool if not shutting down
+                if self.__shutting_down:
+                    print(f"Shutting down, returning paAbort")
+                    return (in_data, pyaudio.paAbort)
+                    
+                try:
+                    self._bg_thread_pool.submit(_bg_audio_callback_ops)
+                except RuntimeError:
+                    # Thread pool is shut down, ignore the error
+                    pass
+
+                return (in_data, pyaudio.paContinue)
             
-            try:
-                # Create audio data queue for this device
-                self.__audio_data_queues[device_id] = queue.Queue()
-                
-                # Create callback function
-                def audio_callback(in_data, frame_count, time_info, status):
-                    # This runs in a separate high-priority thread. Make sure it is highly
-                    # efficient and there is no blocking code here.
-                    if status:
-                        print(f"Audio callback status: {status}")
-                    
-                    # Copy bytes into a new numpy array
-                    audio_data = np.frombuffer(in_data, dtype=np.int16).copy()
-                    
-                    # Enqueue all other operations in a background thread, so we can return immediately.
-                    def _bg_audio_callback_ops():
-                        with self._lock:
-                            if not self.__shutting_down and device_id in self.__listening_streams:
-                                queue_ref = self.__audio_data_queues[device_id]
-                        
-                        # Queue audio data if needed (outside of lock to avoid deadlock)
-                        if queue_ref is not None:
-                            try:
-                                queue_ref.put_nowait(audio_data)
-                            except queue.Full:
-                                pass  # Drop data if queue is full
+            # Open stream
+            stream = self.__audio.open(
+                format=self.__sample_format,
+                channels=self.__channels,
+                rate=self.__sample_rate,
+                frames_per_buffer=self.__chunk_size,
+                input=True,
+                input_device_index=device_index,
+                stream_callback=audio_callback
+            )
+            
+            # Start stream
+            stream.start_stream()
+            self.__listening_streams[device_id] = stream
+            
+            # Start listening thread
+            thread = threading.Thread(
+                target=self._listening_worker,
+                args=(device_id,),
+                daemon=True
+            )
+            thread.start()
+            self.__listening_threads[device_id] = thread
 
-                    # Only submit to thread pool if not shutting down
-                    if self.__shutting_down:
-                        print(f"Shutting down, returning paAbort")
-                        return (in_data, pyaudio.paAbort)
-                        
-                    try:
-                        self._bg_thread_pool.submit(_bg_audio_callback_ops)
-                    except RuntimeError:
-                        # Thread pool is shut down, ignore the error
-                        pass
-
-                    return (in_data, pyaudio.paContinue)
-                
-                # Open stream
-                stream = self.__audio.open(
-                    format=self.__sample_format,
-                    channels=self.__channels,
-                    rate=self.__sample_rate,
-                    frames_per_buffer=self.__chunk_size,
-                    input=True,
-                    input_device_index=device_id,
-                    stream_callback=audio_callback
-                )
-                
-                # Start stream
-                stream.start_stream()
-                self.__listening_streams[device_id] = stream
-                
-                # Start listening thread
-                thread = threading.Thread(
-                    target=self._listening_worker,
-                    args=(device_id,),
-                    daemon=True
-                )
-                thread.start()
-                self.__listening_threads[device_id] = thread
-
-                print(f"Started stream for device {device_id}: {device.name}")
-                
-            except Exception as e:
-                print(f"Failed to start stream for device {device_id}: {e}")
+            print(f"Started stream for device {device_id}: {device.name}")
+            
+        except Exception as e:
+            print(f"Failed to start stream for device {device_id}: {e}")
     
-    def __stop_device_stream(self, device_id: int) -> threading.Thread:
+    def __stop_device_stream(self, device_id: str) -> threading.Thread:
         if device_id not in self.__listening_streams:
             return None
         
@@ -926,7 +956,7 @@ class AudioManager:
         print(f"✅ Stopped device {device_id}")
         return thread
         
-    def _stop_device_stream(self, device_id: int):
+    def _stop_device_stream(self, device_id: str):
         """Stop audio stream for a device"""
         thread = None
         stream = None
@@ -950,6 +980,10 @@ class AudioManager:
             else:
                 print(f"  ✅ Listening thread {device_id} exited")
     
+    def stop_all_streams(self):
+        with self._lock:
+            self.__stop_all_streams()
+            
     def __stop_all_streams(self):
         """Stop all active streams"""
         if not self.__listening_streams:
@@ -962,7 +996,8 @@ class AudioManager:
         
         for device_id in stream_ids:
             try:
-                self.__stop_device_stream(device_id)
+                thread = self.__stop_device_stream(device_id)
+                # XXX: Abandon threads
             except Exception as e:
                 print(f"❌ Failed to stop stream {device_id}: {e}")
                 # Force cleanup
@@ -1115,7 +1150,7 @@ class AudioManager:
         except Exception as e:
             print(f"❌ Error during Google Drive upload: {e}")
     
-    def _listening_worker(self, device_id: int):
+    def _listening_worker(self, device_id: str):
         """Worker thread to handle listening on a specific device"""
         while True:
             wav_file = None

@@ -17,7 +17,7 @@ from .settings_manager import SettingsManager
 class WaveformWidget:
     """Widget for displaying waveform and level meter"""
     
-    def __init__(self, parent, device_id: int, device_name: str):
+    def __init__(self, parent, device_id: str, device_name: str):
         self.device_id = device_id
         self.device_name = device_name
         
@@ -110,6 +110,9 @@ class DeviceRow:
         
         # Device selection checkbox
         self.selected_var = tk.BooleanVar()
+        # Initialize checkbox state based on current device selection
+        current_selection = self.audio_manager.is_device_selected(self.device.id)
+        self.selected_var.set(current_selection)
         self.checkbox = ttk.Checkbutton(
             info_frame,
             variable=self.selected_var,
@@ -600,7 +603,7 @@ class MultitrackRecorderGUI:
         self.audio_manager.set_waveform_callback(self.on_waveform_update)
         
         # Device rows
-        self.device_rows: Dict[int, DeviceRow] = {}
+        self.device_rows: Dict[str, DeviceRow] = {}
         
         # Shutdown flag
         self._shutting_down = False
@@ -795,7 +798,7 @@ class MultitrackRecorderGUI:
             # Clear any pending UI callbacks that might reference old device IDs
             self.root.after_idle(lambda: None)  # Clear idle queue
             
-            # Refresh audio manager (this now has timeout protection)
+            # Refresh audio manager
             self.audio_manager.refresh_devices()
             
             # Update UI
@@ -857,7 +860,7 @@ class MultitrackRecorderGUI:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to start recording: {e}")
     
-    def on_level_update(self, device_id: int, level: float):
+    def on_level_update(self, device_id: str, level: float):
         """Handle audio level updates"""
         # Check if we're shutting down or if root window is being destroyed
         try:
@@ -877,7 +880,7 @@ class MultitrackRecorderGUI:
         except Exception as e:
             pass  # Silently ignore callback errors during shutdown
     
-    def on_waveform_update(self, device_id: int, waveform: List[float]):
+    def on_waveform_update(self, device_id: str, waveform: List[float]):
         """Handle waveform data updates"""
         # Check if we're shutting down or if root window is being destroyed
         try:
@@ -913,13 +916,10 @@ class MultitrackRecorderGUI:
                 self.recording_status.config(text="", foreground='black')
                 print("✅ Recording stopped")
             
-            # Step 2: Uncheck all device checkboxes (turn off all listeners)
-            print("🔌 Turning off all device listeners...")
-            for device_id, device_row in self.device_rows.items():
-                if device_row.selected_var.get():
-                    device_row.selected_var.set(False)
-                    self.audio_manager.set_device_selected(device_id, False)
-            print("✅ All device listeners turned off")
+            # Step 2: Stop all streams
+            print("🔌 Stop all streams...")
+            self.audio_manager.stop_all_streams()
+            print("✅ All streams stopped")
             
             # Step 3: Save settings
             print("💾 Saving settings...")
