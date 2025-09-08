@@ -9,8 +9,10 @@ import numpy as np
 import threading
 import signal
 import sys
+import os
 from typing import Dict, List
 from .audio_manager import AudioManager, AudioDevice
+from .settings_manager import SettingsManager
 
 class WaveformWidget:
     """Widget for displaying waveform and level meter"""
@@ -168,16 +170,358 @@ class DeviceRow:
         self.checkbox.config(state=state)
         self.label_entry.config(state=state)
 
+class ConfigurationDialog:
+    """Configuration dialog for export folder and Google Drive settings"""
+    
+    def __init__(self, parent, audio_manager: AudioManager, settings_manager: SettingsManager):
+        self.audio_manager = audio_manager
+        self.settings_manager = settings_manager
+        self._initializing = True
+        
+        # Create dialog window
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Configuration")
+        self.dialog.geometry("600x500")
+        self.dialog.resizable(True, True)
+        
+        # Make dialog modal
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+        
+        # Center the dialog
+        self.dialog.geometry("+%d+%d" % (parent.winfo_rootx() + 50, parent.winfo_rooty() + 50))
+        
+        self.create_widgets()
+        self.load_settings()
+        
+        # Mark initialization as complete
+        self._initializing = False
+        
+        # Set up cleanup on dialog close
+        self.dialog.protocol("WM_DELETE_WINDOW", self.on_closing)
+    
+    def create_widgets(self):
+        """Create the configuration dialog widgets"""
+        # Main container with padding
+        main_frame = ttk.Frame(self.dialog, padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Title
+        title_label = ttk.Label(main_frame, text="Configuration", 
+                              font=('Arial', 16, 'bold'))
+        title_label.pack(pady=(0, 20))
+        
+        # Export directory section
+        export_frame = ttk.LabelFrame(main_frame, text="Export Settings", padding=15)
+        export_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # Export directory selection
+        export_dir_frame = ttk.Frame(export_frame)
+        export_dir_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Button(export_dir_frame, text="Choose Export Folder", 
+                  command=self.choose_export_directory).pack(side=tk.LEFT)
+        
+        self.export_label = ttk.Label(export_dir_frame, text="No folder selected", 
+                                    foreground='orange')
+        self.export_label.pack(side=tk.LEFT, padx=10)
+        
+        
+        # Google Drive configuration section
+        drive_frame = ttk.LabelFrame(main_frame, text="Google Drive Upload", padding=15)
+        drive_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        
+        # Enable/disable Google Drive upload
+        self.drive_enabled_var = tk.BooleanVar()
+        self.drive_checkbox = ttk.Checkbutton(
+            drive_frame, 
+            text="Enable Google Drive Upload", 
+            variable=self.drive_enabled_var,
+            command=self.on_drive_enabled_changed
+        )
+        self.drive_checkbox.pack(anchor=tk.W, pady=(0, 10))
+        
+        # Google Drive folder ID
+        folder_frame = ttk.Frame(drive_frame)
+        folder_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(folder_frame, text="Folder ID:").pack(side=tk.LEFT)
+        self.folder_id_var = tk.StringVar()
+        self.folder_id_entry = ttk.Entry(folder_frame, textvariable=self.folder_id_var, width=30)
+        self.folder_id_entry.pack(side=tk.LEFT, padx=5)
+        self.folder_id_entry.bind('<KeyRelease>', self.on_folder_id_changed)
+        
+        # Folder validation button
+        self.validate_folder_button = ttk.Button(folder_frame, text="Validate", 
+                                                command=self.validate_folder_id)
+        self.validate_folder_button.pack(side=tk.LEFT, padx=5)
+        
+        # Folder status label
+        self.folder_status_label = ttk.Label(folder_frame, text="", font=('Arial', 8))
+        self.folder_status_label.pack(side=tk.LEFT, padx=5)
+        
+        # Authentication section
+        auth_frame = ttk.Frame(drive_frame)
+        auth_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.auth_button = ttk.Button(auth_frame, text="Authenticate Google Drive", 
+                                     command=self.authenticate_google_drive)
+        self.auth_button.pack(side=tk.LEFT)
+        
+        self.clear_auth_button = ttk.Button(auth_frame, text="Clear Auth", 
+                                           command=self.clear_google_drive_auth)
+        self.clear_auth_button.pack(side=tk.LEFT, padx=5)
+        
+        self.auth_status_label = ttk.Label(auth_frame, text="Not authenticated", 
+                                          foreground='red')
+        self.auth_status_label.pack(side=tk.LEFT, padx=10)
+        
+        # Help text
+        help_text = ttk.Label(drive_frame, 
+                             text="To get your folder ID: 1) Open Google Drive, 2) Navigate to your folder, 3) Copy the ID from the URL",
+                             font=('Arial', 8), foreground='gray')
+        help_text.pack(anchor=tk.W, pady=(10, 0))
+        
+        # Buttons frame
+        buttons_frame = ttk.Frame(main_frame)
+        buttons_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        # Close button
+        ttk.Button(buttons_frame, text="Close", command=self.on_closing).pack(side=tk.RIGHT)
+    
+    def load_settings(self):
+        """Load current settings into the dialog"""
+        try:
+            # Load export directory
+            export_dir = self.settings_manager.get_export_directory()
+            if export_dir:
+                self.export_label.config(text=f"Export to: {export_dir}", foreground='black')
+            else:
+                self.export_label.config(text="No folder selected", foreground='orange')
+            
+            
+            # Load Google Drive settings
+            self.drive_enabled_var.set(self.settings_manager.get_google_drive_enabled())
+            
+            folder_id = self.settings_manager.get_google_drive_folder_id()
+            if folder_id:
+                self.folder_id_var.set(folder_id)
+            
+            # Update authentication status
+            self.update_google_drive_ui_state()
+            
+        except Exception as e:
+            print(f"Error loading settings in configuration dialog: {e}")
+    
+    def choose_export_directory(self):
+        """Choose export directory"""
+        directory = filedialog.askdirectory(title="Select Export Folder")
+        if directory:
+            self.audio_manager.set_export_directory(directory)
+            self.export_label.config(text=f"Export to: {directory}", foreground='black')
+    
+    def on_drive_enabled_changed(self):
+        """Handle Google Drive enabled checkbox change"""
+        enabled = self.drive_enabled_var.get()
+        
+        # Only update audio manager if not during initialization
+        if not self._initializing:
+            self.audio_manager.set_google_drive_enabled(enabled)
+        
+        # Enable/disable folder ID entry based on checkbox
+        state = "normal" if enabled else "disabled"
+        self.folder_id_entry.config(state=state)
+        self.auth_button.config(state=state)
+        self.validate_folder_button.config(state=state)
+        self.clear_auth_button.config(state=state)
+    
+    def on_folder_id_changed(self, event=None):
+        """Handle Google Drive folder ID change"""
+        folder_id = self.folder_id_var.get().strip()
+        if folder_id and not self._initializing:
+            self.audio_manager.set_google_drive_folder_id(folder_id)
+            # Clear status when typing
+            self.folder_status_label.config(text="", foreground='black')
+    
+    def validate_folder_id(self):
+        """Validate the Google Drive folder ID"""
+        folder_id = self.folder_id_var.get().strip()
+        
+        if not folder_id:
+            self.folder_status_label.config(text="Please enter a folder ID", foreground='red')
+            return
+        
+        if not self.audio_manager.is_google_drive_authenticated():
+            self.folder_status_label.config(text="Please authenticate first", foreground='red')
+            return
+        
+        # Show progress
+        self.validate_folder_button.config(text="Validating...", state="disabled")
+        self.folder_status_label.config(text="Validating...", foreground='blue')
+        self.dialog.update_idletasks()
+        
+        # Validate in background thread
+        def validate_task():
+            try:
+                is_valid, message = self.audio_manager.validate_google_drive_folder_id(folder_id)
+                
+                # Update UI in main thread
+                def update_ui():
+                    if is_valid:
+                        self.folder_status_label.config(text=message, foreground='green')
+                        self.audio_manager.set_google_drive_folder_id(folder_id)
+                    else:
+                        self.folder_status_label.config(text=message, foreground='red')
+                    
+                    self.validate_folder_button.config(text="Validate", state="normal")
+                
+                self.dialog.after_idle(update_ui)
+                
+            except Exception as e:
+                def update_ui_error():
+                    self.folder_status_label.config(text=f"Validation error: {e}", foreground='red')
+                    self.validate_folder_button.config(text="Validate", state="normal")
+                
+                self.dialog.after_idle(update_ui_error)
+        
+        # Run validation in background thread
+        threading.Thread(target=validate_task, daemon=True).start()
+    
+    def authenticate_google_drive(self):
+        """Authenticate with Google Drive"""
+        try:
+            # Check if credentials file exists
+            if not os.path.exists("credentials.json"):
+                messagebox.showerror("Error", 
+                    "Google Drive credentials file 'credentials.json' not found.\n\n"
+                    "Please download your OAuth2 credentials from Google Cloud Console:\n"
+                    "1. Go to https://console.cloud.google.com/\n"
+                    "2. Create a new project or select existing one\n"
+                    "3. Enable Google Drive API\n"
+                    "4. Create OAuth2 credentials\n"
+                    "5. Download as 'credentials.json' and place in this directory")
+                return
+            
+            # Show progress
+            self.auth_button.config(text="Authenticating...", state="disabled")
+            self.dialog.update_idletasks()
+            
+            # Authenticate in a background thread
+            def auth_task():
+                try:
+                    success = self.audio_manager.authenticate_google_drive()
+                    
+                    # Update UI in main thread
+                    def update_ui():
+                        if success:
+                            self.auth_status_label.config(text="Authenticated", foreground='green')
+                            messagebox.showinfo("Success", "Google Drive authentication successful!")
+                        else:
+                            self.auth_status_label.config(text="Authentication failed", foreground='red')
+                            messagebox.showerror("Error", "Google Drive authentication failed. Please check your credentials.")
+                        
+                        self.auth_button.config(text="Authenticate Google Drive", state="normal")
+                        
+                        # Update the entire Google Drive UI state to ensure consistency
+                        self.update_google_drive_ui_state()
+                    
+                    self.dialog.after_idle(update_ui)
+                    
+                except Exception as e:
+                    def update_ui_error():
+                        self.auth_status_label.config(text="Authentication failed", foreground='red')
+                        self.auth_button.config(text="Authenticate Google Drive", state="normal")
+                        messagebox.showerror("Error", f"Google Drive authentication failed: {e}")
+                    
+                    self.dialog.after_idle(update_ui_error)
+            
+            # Run authentication in background thread
+            threading.Thread(target=auth_task, daemon=True).start()
+            
+        except Exception as e:
+            self.auth_button.config(text="Authenticate Google Drive", state="normal")
+            messagebox.showerror("Error", f"Failed to start authentication: {e}")
+    
+    def clear_google_drive_auth(self):
+        """Clear Google Drive authentication"""
+        try:
+            result = messagebox.askyesno("Clear Authentication", 
+                "This will clear your Google Drive authentication tokens.\n"
+                "You will need to re-authenticate to use Google Drive upload.\n\n"
+                "This is useful if you're having permission issues or need to\n"
+                "re-authenticate with updated permissions (e.g., for Shared Drives).\n\n"
+                "Do you want to continue?")
+            
+            if result:
+                self.audio_manager.clear_google_drive_authentication()
+                self.auth_status_label.config(text="Not authenticated", foreground='red')
+                self.folder_status_label.config(text="", foreground='black')
+                
+                # Update the entire Google Drive UI state to ensure consistency
+                self.update_google_drive_ui_state()
+                
+                messagebox.showinfo("Success", "Google Drive authentication cleared.\nYou can now re-authenticate if needed.")
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to clear authentication: {e}")
+    
+    def update_google_drive_ui_state(self):
+        """Update Google Drive UI state based on current settings"""
+        try:
+            # Update checkbox state from settings
+            self.drive_enabled_var.set(self.settings_manager.get_google_drive_enabled())
+            
+            # Update folder ID from settings
+            folder_id = self.settings_manager.get_google_drive_folder_id()
+            if folder_id:
+                self.folder_id_var.set(folder_id)
+            
+            # Update authentication status - check both settings and actual authentication state
+            is_authenticated_in_settings = self.settings_manager.get_google_drive_authenticated()
+            is_actually_authenticated = self.audio_manager.is_google_drive_authenticated()
+            
+            # Use the actual authentication state if available, otherwise fall back to settings
+            if is_actually_authenticated:
+                self.auth_status_label.config(text="Authenticated", foreground='green')
+            elif is_authenticated_in_settings:
+                # Settings say authenticated but actual state is not - this can happen if token expired
+                self.auth_status_label.config(text="Authentication expired", foreground='orange')
+            else:
+                self.auth_status_label.config(text="Not authenticated", foreground='red')
+            
+            # Clear folder status initially
+            self.folder_status_label.config(text="", foreground='black')
+            
+            # Enable/disable controls based on checkbox
+            self.on_drive_enabled_changed()
+            
+        except Exception as e:
+            print(f"Error updating Google Drive UI state: {e}")
+    
+    def on_closing(self):
+        """Handle dialog closing"""
+        self.dialog.grab_release()
+        self.dialog.destroy()
+
 class MultitrackRecorderGUI:
     """Main GUI application"""
     
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Multitrack Audio Recorder")
-        self.root.geometry("900x600")
         
-        # Initialize audio manager
-        self.audio_manager = AudioManager()
+        # Initialize settings manager
+        self.settings_manager = SettingsManager()
+        
+        # Disable auto-save during initialization
+        self.settings_manager.set_auto_save(False)
+        
+        # Load window geometry from settings
+        geometry = self.settings_manager.get_window_geometry()
+        self.root.geometry(geometry)
+        
+        # Initialize audio manager with settings manager
+        self.audio_manager = AudioManager(self.settings_manager)
         self.audio_manager.set_level_callback(self.on_level_update)
         self.audio_manager.set_waveform_callback(self.on_waveform_update)
         
@@ -187,14 +531,37 @@ class MultitrackRecorderGUI:
         # Shutdown flag
         self._shutting_down = False
         
+        # Initialization flag to prevent callbacks during setup
+        self._initializing = True
+        
         self.create_widgets()
         self.populate_devices()
+        
+        # Initialize session title from settings
+        self.update_session_title_display()
+        
+        # Mark initialization as complete
+        self._initializing = False
+        
         
         # Set up cleanup on window close
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         # Style configuration for progressbars
         self.setup_styles()
+        
+        # Enable auto-save after GUI is fully initialized
+        self.settings_manager.set_auto_save(True)
+        
+        # Set up window geometry saving after initialization is complete
+        self.root.bind('<Configure>', self.on_window_configure)
+    
+    def open_configuration_dialog(self):
+        """Open the configuration dialog"""
+        try:
+            ConfigurationDialog(self.root, self.audio_manager, self.settings_manager)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open configuration dialog: {e}")
     
     def setup_styles(self):
         """Set up custom styles for progressbars"""
@@ -215,16 +582,29 @@ class MultitrackRecorderGUI:
                               font=('Arial', 16, 'bold'))
         title_label.pack()
         
-        # Export directory selection
-        export_frame = ttk.Frame(self.root)
-        export_frame.pack(fill=tk.X, padx=10, pady=5)
+        # Configuration button
+        config_button = ttk.Button(title_frame, text="Configuration", 
+                                  command=self.open_configuration_dialog)
+        config_button.pack(pady=(5, 0))
         
-        ttk.Button(export_frame, text="Choose Export Folder", 
-                  command=self.choose_export_directory).pack(side=tk.LEFT)
+        # Session Title
+        session_frame = ttk.Frame(self.root)
+        session_frame.pack(fill=tk.X, padx=10, pady=5)
         
-        self.export_label = ttk.Label(export_frame, text="No folder selected", 
-                                    foreground='orange')
-        self.export_label.pack(side=tk.LEFT, padx=10)
+        ttk.Label(session_frame, text="Session Title:", 
+                 font=('Arial', 10, 'bold')).pack(side=tk.LEFT)
+        
+        self.session_title_var = tk.StringVar()
+        self.session_title_entry = ttk.Entry(session_frame, textvariable=self.session_title_var, width=30)
+        self.session_title_entry.pack(side=tk.LEFT, padx=5)
+        self.session_title_entry.bind('<KeyRelease>', self.on_session_title_changed)
+        
+        # Session title help text
+        session_help = ttk.Label(session_frame, 
+                               text="(Optional - will be used as folder name prefix)", 
+                               font=('Arial', 8), foreground='gray')
+        session_help.pack(side=tk.LEFT, padx=5)
+        
         
         # Device controls
         controls_frame = ttk.Frame(self.root)
@@ -298,12 +678,28 @@ class MultitrackRecorderGUI:
         if hasattr(self, 'refresh_button'):
             self.refresh_button.config(state="normal" if enabled else "disabled")
     
-    def choose_export_directory(self):
-        """Choose export directory"""
-        directory = filedialog.askdirectory(title="Select Export Folder")
-        if directory:
-            self.audio_manager.set_export_directory(directory)
-            self.export_label.config(text=f"Export to: {directory}", foreground='black')
+    def on_session_title_changed(self, event=None):
+        """Handle session title change"""
+        session_title = self.session_title_var.get().strip()
+        if not self._initializing:
+            self.audio_manager.set_session_title(session_title)
+    
+    def update_session_title_display(self):
+        """Update session title display from settings"""
+        try:
+            session_title = self.settings_manager.get_session_title()
+            if session_title:
+                self.session_title_var.set(session_title)
+        except Exception as e:
+            print(f"Error updating session title display: {e}")
+    
+    
+    def on_window_configure(self, event):
+        """Handle window configuration changes (resize, move)"""
+        if event.widget == self.root:
+            # Save window geometry
+            geometry = self.root.geometry()
+            self.settings_manager.set_window_geometry(geometry)
     
     def refresh_devices(self):
         """Refresh device list with timeout protection"""
@@ -374,8 +770,8 @@ class MultitrackRecorderGUI:
                     messagebox.showwarning("Warning", "No devices selected for recording")
                     return
                 
-                if not self.audio_manager.get_export_directory():
-                    messagebox.showwarning("Warning", "Please select an export directory first")
+                if not self.settings_manager.get_export_directory():
+                    messagebox.showwarning("Warning", "Please select an export directory first in Configuration")
                     return
                 
                 self.audio_manager.start_recording()
@@ -451,7 +847,12 @@ class MultitrackRecorderGUI:
                     self.audio_manager.set_device_selected(device_id, False)
             print("✅ All device listeners turned off")
             
-            # Step 3: Clean up audio manager
+            # Step 3: Save settings
+            print("💾 Saving settings...")
+            self.settings_manager.force_save()
+            print("✅ Settings saved")
+            
+            # Step 4: Clean up audio manager
             print("🧹 Cleaning up audio resources...")
             self.audio_manager.cleanup()
             print("✅ Audio cleanup completed")
@@ -460,7 +861,7 @@ class MultitrackRecorderGUI:
 
         def shutdown():
             try:
-                # Step 4: Force update UI to ensure all changes are visible
+                # Step 5: Force update UI to ensure all changes are visible
                 self.root.update_idletasks()
                 
             except Exception as e:

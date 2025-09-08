@@ -9,6 +9,14 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import json
+import pickle
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from .settings_manager import SettingsManager
 
 @dataclass
 class AudioDevice:
@@ -21,6 +29,264 @@ class AudioDevice:
     default_low_input_latency: float
     default_sample_rate: float
 
+class GoogleDriveUploader:
+    """Handles Google Drive upload functionality"""
+    
+    # If modifying these scopes, delete the file token.pickle.
+    SCOPES = [
+        'https://www.googleapis.com/auth/drive.file',
+        'https://www.googleapis.com/auth/drive'
+    ]
+    
+    def __init__(self):
+        self.service = None
+        self.credentials = None
+        self.folder_id = None
+        self._lock = threading.Lock()
+    
+    def authenticate(self, credentials_file: str = "credentials.json") -> bool:
+        """Authenticate with Google Drive API"""
+        try:
+            with self._lock:
+                # The file token.pickle stores the user's access and refresh tokens.
+                # It is created automatically when the authorization flow completes for the first time.
+                if os.path.exists('token.pickle'):
+                    with open('token.pickle', 'rb') as token:
+                        self.credentials = pickle.load(token)
+                
+                # If there are no (valid) credentials available, let the user log in.
+                if not self.credentials or not self.credentials.valid:
+                    if self.credentials and self.credentials.expired and self.credentials.refresh_token:
+                        self.credentials.refresh(Request())
+                    else:
+                        if not os.path.exists(credentials_file):
+                            print(f"❌ Google Drive credentials file '{credentials_file}' not found.")
+                            print("Please download your OAuth2 credentials from Google Cloud Console.")
+                            return False
+                        
+                        flow = InstalledAppFlow.from_client_secrets_file(
+                            credentials_file, self.SCOPES)
+                        self.credentials = flow.run_local_server(port=0)
+                    
+                    # Save the credentials for the next run
+                    with open('token.pickle', 'wb') as token:
+                        pickle.dump(self.credentials, token)
+                
+                self.service = build('drive', 'v3', credentials=self.credentials)
+                print("✅ Google Drive authentication successful")
+                return True
+                
+        except Exception as e:
+            print(f"❌ Google Drive authentication failed: {e}")
+            return False
+    
+    def set_folder_id(self, folder_id: str):
+        """Set the Google Drive folder ID for uploads"""
+        with self._lock:
+            self.folder_id = folder_id
+            print(f"📁 Google Drive folder ID set to: {folder_id}")
+    
+    def validate_folder_id(self, folder_id: str) -> tuple[bool, str]:
+        """Validate that a folder ID exists and is accessible"""
+        if not self.is_authenticated():
+            return False, "Not authenticated with Google Drive"
+        
+        if not folder_id or not folder_id.strip():
+            return False, "Folder ID cannot be empty"
+        
+        try:
+            with self._lock:
+                folder_info = self.service.files().get(
+                    fileId=folder_id.strip(),
+                    fields='id,name,mimeType',
+                    supportsAllDrives=True
+                ).execute()
+                
+                if folder_info.get('mimeType') != 'application/vnd.google-apps.folder':
+                    return False, f"The specified ID is not a folder: {folder_id}"
+                
+                folder_name = folder_info.get('name', 'Unknown')
+                return True, f"Valid folder: {folder_name}"
+                
+        except Exception as e:
+            return False, f"Cannot access folder: {e}"
+    
+    def get_folder_id(self) -> Optional[str]:
+        """Get the current Google Drive folder ID"""
+        with self._lock:
+            return self.folder_id
+    
+    def is_authenticated(self) -> bool:
+        """Check if authenticated with Google Drive"""
+        with self._lock:
+            return self.service is not None and self.credentials is not None
+    
+    def clear_authentication(self):
+        """Clear authentication tokens (useful for re-authentication with new scopes)"""
+        with self._lock:
+            self.service = None
+            self.credentials = None
+            
+        # Remove token file if it exists
+        try:
+            if os.path.exists('token.pickle'):
+                os.remove('token.pickle')
+                print("🗑️ Cleared Google Drive authentication tokens")
+        except Exception as e:
+            print(f"⚠️ Could not remove token file: {e}")
+    
+    def create_folder(self, folder_name: str, parent_folder_id: Optional[str] = None) -> Optional[str]:
+        """Create a folder in Google Drive and return its ID"""
+        if not self.is_authenticated():
+            print("❌ Not authenticated with Google Drive")
+            return None
+        
+        try:
+            with self._lock:
+                # Use the main folder ID if no parent specified
+                parent_id = parent_folder_id or self.folder_id
+                if not parent_id:
+                    print("❌ No parent folder ID available")
+                    return None
+                
+                # Check if folder already exists
+                existing_folder_id = self._find_folder_by_name(folder_name, parent_id)
+                if existing_folder_id:
+                    print(f"📁 Using existing folder: {folder_name}")
+                    return existing_folder_id
+                
+                # Create folder metadata
+                folder_metadata = {
+                    'name': folder_name,
+                    'mimeType': 'application/vnd.google-apps.folder',
+                    'parents': [parent_id]
+                }
+                
+                # Create the folder
+                folder = self.service.files().create(
+                    body=folder_metadata,
+                    fields='id,name',
+                    supportsAllDrives=True
+                ).execute()
+                
+                folder_id = folder.get('id')
+                print(f"📁 Created Google Drive folder: {folder_name} (ID: {folder_id})")
+                return folder_id
+                
+        except Exception as e:
+            print(f"❌ Failed to create Google Drive folder '{folder_name}': {e}")
+            return None
+    
+    def _find_folder_by_name(self, folder_name: str, parent_folder_id: str) -> Optional[str]:
+        """Find a folder by name within a parent folder"""
+        try:
+            # Search for folders with the exact name in the parent folder
+            query = f"name='{folder_name}' and parents in '{parent_folder_id}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            
+            results = self.service.files().list(
+                q=query,
+                fields='files(id,name)',
+                supportsAllDrives=True
+            ).execute()
+            
+            folders = results.get('files', [])
+            if folders:
+                return folders[0]['id']  # Return the first match
+            
+            return None
+            
+        except Exception as e:
+            print(f"❌ Error searching for folder '{folder_name}': {e}")
+            return None
+
+    def upload_file(self, file_path: str, file_name: Optional[str] = None, parent_folder_id: Optional[str] = None, settings_manager=None) -> bool:
+        """Upload a file to Google Drive"""
+        if not self.is_authenticated():
+            print("❌ Not authenticated with Google Drive")
+            return False
+        
+        if not self.folder_id:
+            print("❌ No Google Drive folder ID set")
+            return False
+        
+        try:
+            with self._lock:
+                if not os.path.exists(file_path):
+                    print(f"❌ File not found: {file_path}")
+                    return False
+                
+                if file_name is None:
+                    file_name = os.path.basename(file_path)
+                
+                # Check if file has already been uploaded
+                if settings_manager and settings_manager.is_file_uploaded(file_path):
+                    print(f"⏭️ Skipping {file_name} - already uploaded")
+                    return True
+                
+                # Use the specified parent folder or the main folder
+                target_folder_id = parent_folder_id or self.folder_id
+                
+                # First, verify the target folder exists and we have access
+                try:
+                    folder_info = self.service.files().get(
+                        fileId=target_folder_id,
+                        fields='id,name,mimeType',
+                        supportsAllDrives=True
+                    ).execute()
+                    
+                    if folder_info.get('mimeType') != 'application/vnd.google-apps.folder':
+                        print(f"❌ The specified ID is not a folder: {target_folder_id}")
+                        return False
+                    
+                    folder_name = folder_info.get('name', 'Unknown')
+                    if parent_folder_id:
+                        print(f"📁 Uploading to session folder: {folder_name}")
+                    else:
+                        print(f"📁 Uploading to folder: {folder_name}")
+                    
+                except Exception as folder_error:
+                    print(f"❌ Cannot access Google Drive folder {target_folder_id}: {folder_error}")
+                    print("💡 Please check:")
+                    print("   - The folder ID is correct")
+                    print("   - You have access to the folder")
+                    print("   - The folder exists in your Google Drive")
+                    return False
+                
+                # Create file metadata
+                file_metadata = {
+                    'name': file_name,
+                    'parents': [target_folder_id]
+                }
+                
+                # Upload file
+                media = MediaFileUpload(file_path, resumable=True)
+                file = self.service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id',
+                    supportsAllDrives=True
+                ).execute()
+                
+                print(f"✅ Uploaded {file_name} to Google Drive (ID: {file.get('id')})")
+                
+                # Mark file as uploaded
+                if settings_manager:
+                    stat = os.stat(file_path)
+                    settings_manager.mark_file_uploaded(file_path, stat.st_size, stat.st_mtime)
+                
+                return True
+                
+        except Exception as e:
+            print(f"❌ Failed to upload {file_path} to Google Drive: {e}")
+            return False
+    
+    def upload_files(self, file_paths: List[str], parent_folder_id: Optional[str] = None, settings_manager=None) -> Dict[str, bool]:
+        """Upload multiple files to Google Drive"""
+        results = {}
+        for file_path in file_paths:
+            results[file_path] = self.upload_file(file_path, parent_folder_id=parent_folder_id, settings_manager=settings_manager)
+        return results
+
 STOP = object()
 
 class AudioManager:
@@ -28,7 +294,7 @@ class AudioManager:
     
     # Fields/methods that start with "__" should only be accessed when _lock is held
     # or during initialization.
-    def __init__(self):
+    def __init__(self, settings_manager: Optional[SettingsManager] = None):
         self.__audio = pyaudio.PyAudio()
         self.__input_devices: List[AudioDevice] = []
         self.__selected_devices: Dict[int, bool] = {}
@@ -53,6 +319,19 @@ class AudioManager:
         # Export directory
         self.__export_directory: Optional[Path] = None
         
+        # Session title
+        self.__session_title: str = ""
+        
+        # Current session folder (set when recording starts)
+        self.__current_session_folder: Optional[Path] = None
+        
+        # Google Drive uploader
+        self.__drive_uploader = GoogleDriveUploader()
+        self.__upload_to_drive = False
+        
+        # Settings manager
+        self.__settings_manager = settings_manager or SettingsManager()
+        
         self.__is_recording = False
         self.__shutting_down = False
         self._lock = threading.Lock()
@@ -60,6 +339,64 @@ class AudioManager:
         self._callback_thread_pool = ThreadPoolExecutor(max_workers=2)
         
         self.__load_input_devices()
+        self.__load_settings()
+    
+    def __load_settings(self):
+        """Load settings from settings manager"""
+        try:
+            # Load export directory
+            export_dir = self.__settings_manager.get_export_directory()
+            if export_dir:
+                self.set_export_directory(export_dir)
+            
+            # Load session title
+            session_title = self.__settings_manager.get_session_title()
+            if session_title:
+                self.__session_title = session_title
+            
+            # Load device labels
+            for device in self.__input_devices:
+                label = self.__settings_manager.get_device_label(device.id)
+                if label:
+                    self.__device_labels[device.id] = label
+            
+            # Load Google Drive settings
+            self.__upload_to_drive = self.__settings_manager.get_google_drive_enabled()
+            folder_id = self.__settings_manager.get_google_drive_folder_id()
+            if folder_id:
+                self.__drive_uploader.set_folder_id(folder_id)
+            
+            # Load selected devices
+            self.__load_selected_devices()
+            
+            print("✅ Loaded settings from settings manager")
+            
+            # Attempt automatic Google Drive authentication if enabled
+            if self.__upload_to_drive:
+                self.try_auto_authenticate_google_drive()
+            
+        except Exception as e:
+            print(f"❌ Error loading settings: {e}")
+    
+    def __load_selected_devices(self):
+        """Load selected devices from settings"""
+        try:
+            last_used_devices = self.__settings_manager.get_last_used_devices()
+            for device_id in last_used_devices:
+                if device_id in self.__selected_devices:
+                    self.__selected_devices[device_id] = True
+                    # Start the device stream
+                    self._start_device_stream(device_id)
+        except Exception as e:
+            print(f"❌ Error loading selected devices: {e}")
+    
+    def __save_selected_devices(self):
+        """Save selected devices to settings"""
+        try:
+            selected_devices = [device_id for device_id, selected in self.__selected_devices.items() if selected]
+            self.__settings_manager.set_last_used_devices(selected_devices)
+        except Exception as e:
+            print(f"❌ Error saving selected devices: {e}")
     
     def __load_input_devices(self):
         """Load all available input audio devices"""
@@ -184,6 +521,9 @@ class AudioManager:
             self._start_device_stream(device_id)
         elif should_stop:
             self._stop_device_stream(device_id)
+        
+        # Save selected devices to settings
+        self.__save_selected_devices()
     
     def is_device_selected(self, device_id: int) -> bool:
         """Check if device is selected"""
@@ -203,6 +543,9 @@ class AudioManager:
         """Set custom label for device"""
         with self._lock:
             self.__device_labels[device_id] = label
+        
+        # Save to settings
+        self.__settings_manager.set_device_label(device_id, label)
     
     def get_device_label(self, device_id: int) -> str:
         """Get custom label for device"""
@@ -217,6 +560,9 @@ class AudioManager:
         """Clear custom label for device"""
         with self._lock:
             self.__device_labels.pop(device_id, None)
+        
+        # Save to settings
+        self.__settings_manager.set_device_label(device_id, "")
     
     def set_export_directory(self, directory: str):
         """Set the export directory for recordings"""
@@ -224,11 +570,143 @@ class AudioManager:
             self.__export_directory = Path(directory)
             if not self.__export_directory.exists():
                 self.__export_directory.mkdir(parents=True, exist_ok=True)
+        
+        # Save to settings
+        self.__settings_manager.set_export_directory(directory)
     
     def get_export_directory(self) -> Optional[Path]:
         """Get the export directory for recordings"""
         with self._lock:
             return self.__export_directory
+    
+    def set_session_title(self, title: str):
+        """Set the session title for recordings"""
+        with self._lock:
+            self.__session_title = title
+            print(f"📝 Session title set to: {title}")
+        
+        # Save to settings
+        self.__settings_manager.set_session_title(title)
+    
+    def get_session_title(self) -> str:
+        """Get the session title for recordings"""
+        with self._lock:
+            return self.__session_title
+    
+    def _generate_session_folder_name(self) -> str:
+        """Generate session folder name from title and timestamp"""
+        from datetime import datetime
+        import re
+        
+        # Get current local time
+        now = datetime.now()
+        
+        # Format timestamp as YYYY-MM-DD_HH-MM-SS (no invalid path characters)
+        timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+        
+        # Get session title and sanitize it
+        session_title = self.__session_title.strip()
+        
+        if session_title:
+            # Remove or replace invalid path characters
+            # Replace spaces with underscores, remove other problematic characters
+            sanitized_title = re.sub(r'[<>:"/\\|?*]', '', session_title)
+            sanitized_title = re.sub(r'\s+', '_', sanitized_title)
+            sanitized_title = sanitized_title.strip('_')
+            
+            if sanitized_title:
+                return f"{sanitized_title}_{timestamp}"
+        
+        # If no title or title becomes empty after sanitization, just use timestamp
+        return timestamp
+    
+    def get_current_session_folder(self) -> Optional[Path]:
+        """Get the current session folder path"""
+        with self._lock:
+            return self.__current_session_folder
+    
+    def set_google_drive_enabled(self, enabled: bool):
+        """Enable or disable Google Drive upload"""
+        with self._lock:
+            self.__upload_to_drive = enabled
+            print(f"📤 Google Drive upload {'enabled' if enabled else 'disabled'}")
+        
+        # Save to settings
+        self.__settings_manager.set_google_drive_enabled(enabled)
+    
+    def is_google_drive_enabled(self) -> bool:
+        """Check if Google Drive upload is enabled"""
+        with self._lock:
+            return self.__upload_to_drive
+    
+    def authenticate_google_drive(self, credentials_file: str = "credentials.json") -> bool:
+        """Authenticate with Google Drive"""
+        success = self.__drive_uploader.authenticate(credentials_file)
+        if success:
+            # Save authentication status
+            self.__settings_manager.set_google_drive_authenticated(True)
+        return success
+    
+    def try_auto_authenticate_google_drive(self, credentials_file: str = "credentials.json") -> bool:
+        """Try to automatically authenticate with Google Drive using stored credentials"""
+        try:
+            # Only attempt auto-authentication if Google Drive is enabled
+            if not self.__upload_to_drive:
+                return False
+            
+            # Check if credentials file exists
+            if not os.path.exists(credentials_file):
+                print("📁 Google Drive credentials file not found, skipping auto-authentication")
+                return False
+            
+            # Check if we have a stored token
+            if not os.path.exists('token.pickle'):
+                print("📁 No stored Google Drive token found, skipping auto-authentication")
+                return False
+            
+            print("🔄 Attempting automatic Google Drive authentication...")
+            success = self.__drive_uploader.authenticate(credentials_file)
+            
+            if success:
+                print("✅ Automatic Google Drive authentication successful")
+                # Save authentication status
+                self.__settings_manager.set_google_drive_authenticated(True)
+            else:
+                print("❌ Automatic Google Drive authentication failed")
+                # Clear authentication status
+                self.__settings_manager.set_google_drive_authenticated(False)
+            
+            return success
+            
+        except Exception as e:
+            print(f"❌ Error during automatic Google Drive authentication: {e}")
+            # Clear authentication status on error
+            self.__settings_manager.set_google_drive_authenticated(False)
+            return False
+    
+    def set_google_drive_folder_id(self, folder_id: str):
+        """Set the Google Drive folder ID for uploads"""
+        self.__drive_uploader.set_folder_id(folder_id)
+        # Save to settings
+        self.__settings_manager.set_google_drive_folder_id(folder_id)
+    
+    def validate_google_drive_folder_id(self, folder_id: str) -> tuple[bool, str]:
+        """Validate that a Google Drive folder ID exists and is accessible"""
+        return self.__drive_uploader.validate_folder_id(folder_id)
+    
+    def get_google_drive_folder_id(self) -> Optional[str]:
+        """Get the current Google Drive folder ID"""
+        return self.__drive_uploader.get_folder_id()
+    
+    def is_google_drive_authenticated(self) -> bool:
+        """Check if authenticated with Google Drive"""
+        return self.__drive_uploader.is_authenticated()
+    
+    def clear_google_drive_authentication(self):
+        """Clear Google Drive authentication tokens"""
+        self.__drive_uploader.clear_authentication()
+        # Save authentication status
+        self.__settings_manager.set_google_drive_authenticated(False)
     
     def is_recording(self) -> bool:
         """Check if currently recording"""
@@ -421,6 +899,17 @@ class AudioManager:
             if not selected_devices:
                 raise ValueError("No devices selected for recording")
             
+            # Generate session folder name and create the folder
+            session_folder_name = self._generate_session_folder_name()
+            self.__current_session_folder = self.__export_directory / session_folder_name
+            
+            # Create the session folder
+            try:
+                self.__current_session_folder.mkdir(parents=True, exist_ok=True)
+                print(f"📁 Created session folder: {self.__current_session_folder}")
+            except Exception as e:
+                raise ValueError(f"Failed to create session folder: {e}")
+            
             self.__is_recording = True
             
             # Create recording files for selected devices
@@ -436,7 +925,7 @@ class AudioManager:
                 else:
                     filename = f"device_{device_id}_recording.wav"
                 
-                filepath = self.__export_directory / filename
+                filepath = self.__current_session_folder / filename
                 
                 try:
                     # Create WAV file
@@ -463,7 +952,78 @@ class AudioManager:
             
             # Each listening worker is responsible for closing the file
             # and removing it from self.__recording_files
+        
         print("Recording stopped")
+        
+        # Upload to Google Drive if enabled
+        if self.__upload_to_drive and self.__export_directory:
+            self._upload_recordings_to_drive()
+        
+        # Clear the current session folder reference
+        with self._lock:
+            self.__current_session_folder = None
+    
+    def _upload_recordings_to_drive(self):
+        """Upload recorded files to Google Drive"""
+        try:
+            if not self.__drive_uploader.is_authenticated():
+                print("❌ Google Drive not authenticated, skipping upload")
+                return
+            
+            if not self.__drive_uploader.get_folder_id():
+                print("❌ No Google Drive folder ID set, skipping upload")
+                return
+            
+            # Get the current session folder
+            session_folder = self.get_current_session_folder()
+            if not session_folder or not session_folder.exists():
+                print("❌ No session folder found for upload")
+                return
+            
+            # Wait a moment for all files to be finalized
+            time.sleep(1.0)
+            
+            # Find all .wav files in the session folder
+            wav_files = list(session_folder.glob("*.wav"))
+            
+            if not wav_files:
+                print(f"📁 No .wav files found in session folder: {session_folder}")
+                return
+            
+            # Get the session folder name (without path)
+            session_folder_name = session_folder.name
+            
+            print(f"📤 Uploading {len(wav_files)} files from session folder '{session_folder_name}' to Google Drive...")
+            
+            # Upload files in a background thread to avoid blocking
+            def upload_task():
+                # Create a session folder in Google Drive
+                drive_session_folder_id = self.__drive_uploader.create_folder(session_folder_name)
+                
+                if not drive_session_folder_id:
+                    print("❌ Failed to create session folder in Google Drive")
+                    return
+                
+                # Upload files to the session folder
+                results = self.__drive_uploader.upload_files(
+                    [str(f) for f in wav_files], 
+                    parent_folder_id=drive_session_folder_id,
+                    settings_manager=self.__settings_manager
+                )
+                
+                successful_uploads = sum(1 for success in results.values() if success)
+                total_files = len(results)
+                
+                if successful_uploads == total_files:
+                    print(f"✅ Successfully uploaded all {total_files} files to Google Drive session folder '{session_folder_name}'")
+                else:
+                    print(f"⚠️ Uploaded {successful_uploads}/{total_files} files to Google Drive session folder '{session_folder_name}'")
+            
+            # Submit upload task to background thread pool
+            self._bg_thread_pool.submit(upload_task)
+            
+        except Exception as e:
+            print(f"❌ Error during Google Drive upload: {e}")
     
     def _listening_worker(self, device_id: int):
         """Worker thread to handle listening on a specific device"""
@@ -552,9 +1112,9 @@ class AudioManager:
                     # Close WAV file
                     try:
                         wav_file.close()
-                        print(f"BGThread({device_id}): Finalized recording {wav_file._file.name}")
+                        print(f"BGThread({device_id}): Finalized recording")
                     except Exception as e:
-                        print(f"BGThread({device_id}): Error closing file {wav_file._file.name}: {e}")
+                        print(f"BGThread({device_id}): Error closing file: {e}")
             
     
     def cleanup(self):

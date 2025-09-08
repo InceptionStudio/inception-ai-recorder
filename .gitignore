@@ -262,6 +262,8 @@ tmp/
 config.ini
 settings.json
 .secrets
+credentials.json
+token.pickle
 
 # Backup files
 *.bak
