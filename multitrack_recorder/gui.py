@@ -47,12 +47,11 @@ class WaveformWidget:
         self.level_progress = ttk.Progressbar(
             self.frame, 
             orient='vertical', 
-            length=100,
             mode='determinate',
             variable=self.level_var,
             maximum=100
         )
-        self.level_progress.pack(side=tk.RIGHT, padx=5)
+        self.level_progress.pack(side=tk.RIGHT, fill=tk.Y, padx=4)
         
         # Initialize empty waveform
         self.update_waveform([])
@@ -105,25 +104,29 @@ class DeviceRow:
         control_frame = ttk.Frame(self.frame)
         control_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5)
         
-        # Device selection checkbox
-        self.selected_var = tk.BooleanVar()
-        self.checkbox = ttk.Checkbutton(
-            control_frame,
-            variable=self.selected_var,
-            command=self.on_selection_changed
-        )
-        self.checkbox.pack(anchor=tk.W)
-        
-        # Device name and info
+        # Device name and checkbox in same row
         info_frame = ttk.Frame(control_frame)
         info_frame.pack(fill=tk.X, pady=2)
         
-        device_label = ttk.Label(info_frame, text=device.name, font=('Courier', 10))
-        device_label.pack(anchor=tk.W)
+        # Device selection checkbox
+        self.selected_var = tk.BooleanVar()
+        self.checkbox = ttk.Checkbutton(
+            info_frame,
+            variable=self.selected_var,
+            command=self.on_selection_changed
+        )
+        self.checkbox.pack(side=tk.LEFT, anchor=tk.CENTER)
         
-        channels_label = ttk.Label(info_frame, text=f"{device.host_api}, ID {device.id}", 
+        device_label = ttk.Label(info_frame, text=device.name, font=('Courier', 10))
+        device_label.pack(side=tk.LEFT, anchor=tk.CENTER, padx=(5, 0))
+        
+        # Device details below the name
+        details_frame = ttk.Frame(control_frame)
+        details_frame.pack(fill=tk.X, pady=(0, 2))
+        
+        details_label = ttk.Label(details_frame, text=f"{device.host_api}, ID {device.id}", 
                                  font=('Arial', 8), foreground='gray')
-        channels_label.pack(anchor=tk.W)
+        details_label.pack(anchor=tk.W)
         
         # Custom label entry
         label_frame = ttk.Frame(control_frame)
@@ -170,7 +173,7 @@ class DeviceRow:
         
         # Right side - waveform and level
         self.waveform_widget = WaveformWidget(self.frame, device.id, device.name)
-        self.waveform_widget.frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5)
+        self.waveform_widget.frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
     
     def on_selection_changed(self):
         """Handle device selection change"""
