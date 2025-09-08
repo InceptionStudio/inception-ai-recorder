@@ -150,7 +150,7 @@ class AudioManager:
                 # Always clear the shutdown flag
                 self.__shutting_down = False
     
-    def _get_device_by_id(self, device_id: int) -> Optional[AudioDevice]:
+    def __get_device_by_id(self, device_id: int) -> Optional[AudioDevice]:
         """Get device by ID"""
         return next((device for device in self.__input_devices if device.id == device_id), None)
     
@@ -193,9 +193,9 @@ class AudioManager:
     def get_selected_device_ids(self) -> List[int]:
         """Get list of selected device IDs"""
         with self._lock:
-            return self._get_selected_device_ids()
+            return self.__get_selected_device_ids()
     
-    def _get_selected_device_ids(self) -> List[int]:
+    def __get_selected_device_ids(self) -> List[int]:
         """Get list of selected device IDs"""
         return [device_id for device_id, selected in self.__selected_devices.items() if selected]
 
@@ -207,9 +207,9 @@ class AudioManager:
     def get_device_label(self, device_id: int) -> str:
         """Get custom label for device"""
         with self._lock:
-            return self._get_device_label(device_id)
+            return self.__get_device_label(device_id)
     
-    def _get_device_label(self, device_id: int) -> str:
+    def __get_device_label(self, device_id: int) -> str:
         """Get custom label for device"""
         return self.__device_labels.get(device_id, "")
     
@@ -247,72 +247,73 @@ class AudioManager:
     
     def _start_device_stream(self, device_id: int):
         """Start audio stream for a device"""
-        if device_id in self.__listening_streams:
-            return
-        
-        device = self._get_device_by_id(device_id)
-        if not device:
-            return
-        
-        try:
-            # Create audio data queue for this device
-            self.__audio_data_queues[device_id] = queue.Queue()
+        with self._lock:
+            if device_id in self.__listening_streams:
+                return
             
-            # Create callback function
-            def audio_callback(in_data, frame_count, time_info, status):
-                # This runs in a separate high-priority thread. Make sure it is highly
-                # efficient and there is no blocking code here.
-                if status:
-                    print(f"Audio callback status: {status}")
+            device = self.__get_device_by_id(device_id)
+            if not device:
+                return
+            
+            try:
+                # Create audio data queue for this device
+                self.__audio_data_queues[device_id] = queue.Queue()
                 
-                # Copy bytes into a new numpy array
-                audio_data = np.frombuffer(in_data, dtype=np.int16).copy()
-                
-                # Enqueue all other operations in a background thread, so we can return immediately.
-                def _bg_audio_callback_ops():
-                    with self._lock:
-                        if not self.__shutting_down and device_id in self.__listening_streams:
-                            queue_ref = self.__audio_data_queues[device_id]
+                # Create callback function
+                def audio_callback(in_data, frame_count, time_info, status):
+                    # This runs in a separate high-priority thread. Make sure it is highly
+                    # efficient and there is no blocking code here.
+                    if status:
+                        print(f"Audio callback status: {status}")
                     
-                    # Queue audio data if needed (outside of lock to avoid deadlock)
-                    if queue_ref is not None:
-                        try:
-                            queue_ref.put_nowait(audio_data)
-                        except queue.Full:
-                            pass  # Drop data if queue is full
+                    # Copy bytes into a new numpy array
+                    audio_data = np.frombuffer(in_data, dtype=np.int16).copy()
+                    
+                    # Enqueue all other operations in a background thread, so we can return immediately.
+                    def _bg_audio_callback_ops():
+                        with self._lock:
+                            if not self.__shutting_down and device_id in self.__listening_streams:
+                                queue_ref = self.__audio_data_queues[device_id]
+                        
+                        # Queue audio data if needed (outside of lock to avoid deadlock)
+                        if queue_ref is not None:
+                            try:
+                                queue_ref.put_nowait(audio_data)
+                            except queue.Full:
+                                pass  # Drop data if queue is full
 
-                self._bg_thread_pool.submit(_bg_audio_callback_ops)
+                    self._bg_thread_pool.submit(_bg_audio_callback_ops)
 
-                return (in_data, pyaudio.paContinue)
-            
-            # Open stream
-            stream = self.__audio.open(
-                format=self.__sample_format,
-                channels=self.__channels,
-                rate=self.__sample_rate,
-                frames_per_buffer=self.__chunk_size,
-                input=True,
-                input_device_index=device_id,
-                stream_callback=audio_callback
-            )
-            
-            # Start stream
-            stream.start_stream()
-            self.__listening_streams[device_id] = stream
-            
-            # Start listening thread
-            thread = threading.Thread(
-                target=self._listening_worker,
-                args=(device_id,),
-                daemon=True
-            )
-            thread.start()
-            self.__listening_threads[device_id] = thread
+                    return (in_data, pyaudio.paContinue)
+                
+                # Open stream
+                stream = self.__audio.open(
+                    format=self.__sample_format,
+                    channels=self.__channels,
+                    rate=self.__sample_rate,
+                    frames_per_buffer=self.__chunk_size,
+                    input=True,
+                    input_device_index=device_id,
+                    stream_callback=audio_callback
+                )
+                
+                # Start stream
+                stream.start_stream()
+                self.__listening_streams[device_id] = stream
+                
+                # Start listening thread
+                thread = threading.Thread(
+                    target=self._listening_worker,
+                    args=(device_id,),
+                    daemon=True
+                )
+                thread.start()
+                self.__listening_threads[device_id] = thread
 
-            print(f"Started stream for device {device_id}: {device.name}")
-            
-        except Exception as e:
-            print(f"Failed to start stream for device {device_id}: {e}")
+                print(f"Started stream for device {device_id}: {device.name}")
+                
+            except Exception as e:
+                print(f"Failed to start stream for device {device_id}: {e}")
     
     def __stop_device_stream(self, device_id: int) -> threading.Thread:
         if device_id not in self.__listening_streams:
@@ -416,7 +417,7 @@ class AudioManager:
             if self.__is_recording:
                 return
 
-            selected_devices = self._get_selected_device_ids()
+            selected_devices = self.__get_selected_device_ids()
             if not selected_devices:
                 raise ValueError("No devices selected for recording")
             
@@ -424,12 +425,12 @@ class AudioManager:
             
             # Create recording files for selected devices
             for device_id in selected_devices:
-                device = self._get_device_by_id(device_id)
+                device = self.__get_device_by_id(device_id)
                 if not device:
                     continue
                 
                 # Generate filename
-                label = self._get_device_label(device_id)
+                label = self.__get_device_label(device_id)
                 if label:
                     filename = f"{label}_recording.wav"
                 else:
@@ -455,20 +456,13 @@ class AudioManager:
     
     def stop_recording(self):
         """Stop recording and finalize files"""
-        files_to_close = []
-        
         with self._lock:
             if not self.__is_recording:
                 return
-            
             self.__is_recording = False
             
-            # Collect threads and files to process outside of lock
-            files_to_close = list(self.__recording_files.items())
-            
-            # Clear recording data
-            self.__recording_files.clear()
-        
+            # Each listening worker is responsible for closing the file
+            # and removing it from self.__recording_files
         print("Recording stopped")
     
     def _listening_worker(self, device_id: int):
@@ -484,8 +478,9 @@ class AudioManager:
             
                 is_recording = self.__is_recording
                 wav_file = self.__recording_files.get(device_id)
-                if not is_recording:
-                    self.__recording_files.pop("device_id", None)
+                if not is_recording and wav_file is not None:
+                    print(f"BGThread({device_id}): Getting ready to close file")
+                    self.__recording_files.pop(device_id, None)
             
             try:
                 # Get audio data from queue with timeout
@@ -502,22 +497,26 @@ class AudioManager:
                         level_cb = self.__level_callback
                         waveform_cb = self.__waveform_callback
 
-                if level_cb:
+                if level_cb and not self.__shutting_down:
                     # Calculate RMS level (normalize int16 to 0-1 range)
                     rms = np.sqrt(np.mean(audio_data.astype(np.float32)**2))
                     scaled_rms = min(1.0, rms / 32767.0)  # Normalize by max int16 value
 
-                    # Run level_cb on the _callback_thread_pool
-                    def _level_cb_task():
-                        try:
-                            level_cb(device_id, scaled_rms)
-                        except Exception as e:
-                            print(f"BGThread({device_id}): Error during level callback: {e}")
-                    self._callback_thread_pool.submit(_level_cb_task)
+                    # Only submit to thread pool if not shutting down
+                    if not self.__shutting_down:
+                        # Run level_cb on the _callback_thread_pool
+                        def _level_cb_task():
+                            try:
+                                # Double-check shutdown state and callback validity
+                                if not self.__shutting_down and level_cb is not None:
+                                    level_cb(device_id, scaled_rms)
+                            except Exception as e:
+                                print(f"BGThread({device_id}): Error during level callback: {e}")
+                        self._callback_thread_pool.submit(_level_cb_task)
                 else:
                     print(f"BGThread({device_id}): No level callback")
 
-                if waveform_cb:
+                if waveform_cb and not self.__shutting_down:
                     # Update waveform data (downsample for display)
                     downsample_factor = max(1, len(audio_data) // 100)
                     downsampled = audio_data[::downsample_factor]
@@ -525,53 +524,61 @@ class AudioManager:
                     # Scale int16 to -1.0 to 1.0 range for display
                     scaled_waveform = np.clip(downsampled.astype(np.float32) / 32767.0, -1.0, 1.0).tolist()
 
-                    # Run waveform_cb on the _callback_thread_pool
-                    def _waveform_cb_task():
-                        try:
-                            waveform_cb(device_id, scaled_waveform)
-                        except Exception as e:
-                            print(f"BGThread({device_id}): Error during waveform callback: {e}")
-                    self._callback_thread_pool.submit(_waveform_cb_task)
+                    # Only submit to thread pool if not shutting down
+                    if not self.__shutting_down:
+                        # Run waveform_cb on the _callback_thread_pool
+                        def _waveform_cb_task():
+                            try:
+                                # Double-check shutdown state and callback validity
+                                if not self.__shutting_down and waveform_cb is not None:
+                                    waveform_cb(device_id, scaled_waveform)
+                            except Exception as e:
+                                print(f"BGThread({device_id}): Error during waveform callback: {e}")
+                        self._callback_thread_pool.submit(_waveform_cb_task)
                 else:
                     print(f"BGThread({device_id}): No waveform callback")
 
                 if wav_file is not None:
-                    # Write to WAV file (audio_data is already int16)
+                    # Write int16 audio_data to WAV file
                     wav_file.writeframes(audio_data.tobytes())
 
-                    if not is_recording:
-                        # Close WAV file
-                        try:
-                            wav_file.close()
-                            print(f"BGThread({device_id}): Finalized recording")
-                        except Exception as e:
-                            print(f"BGThread({device_id}): Error closing file: {e}")
-                
             except queue.Empty:
                 continue  # No data available, keep trying
             except Exception as e:
                 print(f"BGThread({device_id}): Recording error: {e}")
                 continue
+            finally:
+                if not is_recording and wav_file is not None:
+                    # Close WAV file
+                    try:
+                        wav_file.close()
+                        print(f"BGThread({device_id}): Finalized recording {wav_file._file.name}")
+                    except Exception as e:
+                        print(f"BGThread({device_id}): Error closing file {wav_file._file.name}: {e}")
+            
     
     def cleanup(self):
         """Cleanup resources"""
         print("🧹 Cleaning up AudioManager...")
         
-        # Set shutdown flag and clear callbacks FIRST to prevent new callbacks
+        # Set shutdown flag to prevent new callbacks
         with self._lock:
             self.__shutting_down = True
-            # Clear callbacks to prevent further GUI updates
-            self.__level_callback = None
-            self.__waveform_callback = None
         
-        # Shutdown thread pools with timeout to ensure clean termination
+        # Shutdown thread pools without waiting to prevent deadlock
         try:
             print("🔄 Shutting down thread pools...")
+            # Shutdown thread pools without waiting to prevent deadlock
             self._callback_thread_pool.shutdown(wait=False)
             self._bg_thread_pool.shutdown(wait=False)
-            print("✅ Background thread pool shut down requested")
+            print("✅ Thread pools shutdown requested")
         except Exception as e:
             print(f"Error shutting down thread pools: {e}")
+        
+        # Clear callbacks AFTER thread pools are shut down
+        with self._lock:
+            self.__level_callback = None
+            self.__waveform_callback = None
         
         if self.__is_recording:
             self.stop_recording()
