@@ -7,6 +7,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import numpy as np
 import threading
+import signal
+import sys
 from typing import Dict, List
 from .audio_manager import AudioManager, AudioDevice
 
@@ -181,6 +183,9 @@ class MultitrackRecorderGUI:
         
         # Device rows
         self.device_rows: Dict[int, DeviceRow] = {}
+        
+        # Shutdown flag
+        self._shutting_down = False
         
         self.create_widgets()
         self.populate_devices()
@@ -384,11 +389,16 @@ class MultitrackRecorderGUI:
     
     def on_level_update(self, device_id: int, level: float):
         """Handle audio level updates"""
-        # Use after() with a delay instead of after_idle() to avoid GIL issues
+        # Check if we're shutting down or if root window is being destroyed
         try:
+            if self._shutting_down or not hasattr(self, 'root') or not self.root.winfo_exists():
+                return
+                
             def safe_update():
                 try:
-                    if device_id in self.device_rows and hasattr(self, 'root') and self.root.winfo_exists():
+                    # Double-check during execution
+                    if (hasattr(self, 'root') and self.root.winfo_exists() and 
+                        device_id in self.device_rows):
                         self.device_rows[device_id].waveform_widget.update_level(level)
                 except Exception as e:
                     pass  # Silently ignore UI update errors during shutdown
@@ -399,11 +409,16 @@ class MultitrackRecorderGUI:
     
     def on_waveform_update(self, device_id: int, waveform: List[float]):
         """Handle waveform data updates"""
-        # Use after() with a delay instead of after_idle() to avoid GIL issues
+        # Check if we're shutting down or if root window is being destroyed
         try:
+            if self._shutting_down or not hasattr(self, 'root') or not self.root.winfo_exists():
+                return
+                
             def safe_update():
                 try:
-                    if device_id in self.device_rows and hasattr(self, 'root') and self.root.winfo_exists():
+                    # Double-check during execution
+                    if (hasattr(self, 'root') and self.root.winfo_exists() and 
+                        device_id in self.device_rows):
                         self.device_rows[device_id].waveform_widget.update_waveform(waveform)
                 except Exception as e:
                     pass  # Silently ignore UI update errors during shutdown
@@ -414,13 +429,58 @@ class MultitrackRecorderGUI:
     
     def on_closing(self):
         """Handle application closing"""
+        # Set shutdown flag to prevent new callbacks
+        self._shutting_down = True
+        
         try:
+            print("🔄 Starting graceful shutdown...")
+            
+            # Step 1: Stop recording if active
+            if self.audio_manager.is_recording():
+                print("🛑 Stopping recording...")
+                self.audio_manager.stop_recording()
+                self.record_button.config(text="Start Recording")
+                self.recording_status.config(text="", foreground='black')
+                print("✅ Recording stopped")
+            
+            # Step 2: Uncheck all device checkboxes (turn off all listeners)
+            print("🔌 Turning off all device listeners...")
+            for device_id, device_row in self.device_rows.items():
+                if device_row.selected_var.get():
+                    device_row.selected_var.set(False)
+                    self.audio_manager.set_device_selected(device_id, False)
+            print("✅ All device listeners turned off")
+            
+            # Step 3: Clean up audio manager
+            print("🧹 Cleaning up audio resources...")
             self.audio_manager.cleanup()
+            print("✅ Audio cleanup completed")
         except Exception as e:
-            print(f"Cleanup error: {e}")
-        finally:
-            self.root.destroy()
-    
+            print(f"Error during shutdown: {e}")
+
+        def shutdown():
+            try:
+                # Step 4: Force update UI to ensure all changes are visible
+                self.root.update_idletasks()
+                
+            except Exception as e:
+                print(f"Error during shutdown: {e}")
+            finally:
+                print("🚪 Closing application window...")
+                self.root.destroy()
+                
+                # Add a small delay to ensure cleanup is complete
+                import time
+                time.sleep(0.1)
+                
+                # Force exit to ensure process terminates
+                import sys
+                import os
+                print("🔄 Exiting application...")
+                sys.exit(0)
+
+        self.root.after_idle(shutdown)
+
     def run(self):
         """Start the GUI main loop"""
         self.root.mainloop()

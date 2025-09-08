@@ -44,7 +44,7 @@ class AudioManager:
         # Listening settings
         self.__sample_rate = 44100
         self.__channels = 1
-        self.__sample_format = pyaudio.paFloat32
+        self.__sample_format = pyaudio.paInt16
         self.__chunk_size = 1024
         
         # Device labels
@@ -266,7 +266,7 @@ class AudioManager:
                     print(f"Audio callback status: {status}")
                 
                 # Copy bytes into a new numpy array
-                audio_data = np.frombuffer(in_data, dtype=np.float32).copy()
+                audio_data = np.frombuffer(in_data, dtype=np.int16).copy()
                 
                 # Enqueue all other operations in a background thread, so we can return immediately.
                 def _bg_audio_callback_ops():
@@ -375,7 +375,7 @@ class AudioManager:
         # Join thread outside of lock to avoid deadlock
         if thread and thread.is_alive():
             print(f"  🔄 Waiting for listening thread {device_id}...")
-            thread.join(timeout=20.0)
+            thread.join(timeout=5.0)
             if thread.is_alive():
                 print(f"  ⚠️ Listening thread {device_id} did not stop gracefully")
             else:
@@ -489,7 +489,7 @@ class AudioManager:
             
             try:
                 # Get audio data from queue with timeout
-                audio_data = audio_queue.get(timeout=20.0)
+                audio_data = audio_queue.get(timeout=2.0)
                 if audio_data is STOP:
                     print(f"BGThread({device_id}): Exiting gracefully")
                     return
@@ -503,9 +503,9 @@ class AudioManager:
                         waveform_cb = self.__waveform_callback
 
                 if level_cb:
-                    # Calculate RMS level
-                    rms = np.sqrt(np.mean(audio_data**2))
-                    scaled_rms = min(1.0, rms * 2.0)  # Scale for better visualization
+                    # Calculate RMS level (normalize int16 to 0-1 range)
+                    rms = np.sqrt(np.mean(audio_data.astype(np.float32)**2))
+                    scaled_rms = min(1.0, rms / 32767.0)  # Normalize by max int16 value
 
                     # Run level_cb on the _callback_thread_pool
                     def _level_cb_task():
@@ -522,8 +522,8 @@ class AudioManager:
                     downsample_factor = max(1, len(audio_data) // 100)
                     downsampled = audio_data[::downsample_factor]
 
-                    # Scale but keep in reasonable range
-                    scaled_waveform = np.clip(downsampled * 2.0, -1.0, 1.0).tolist()
+                    # Scale int16 to -1.0 to 1.0 range for display
+                    scaled_waveform = np.clip(downsampled.astype(np.float32) / 32767.0, -1.0, 1.0).tolist()
 
                     # Run waveform_cb on the _callback_thread_pool
                     def _waveform_cb_task():
@@ -535,12 +535,9 @@ class AudioManager:
                 else:
                     print(f"BGThread({device_id}): No waveform callback")
 
-                # Convert float32 to int16 for WAV file
-                audio_int16 = (audio_data * 32767).astype(np.int16)
-                
                 if wav_file is not None:
-                    # Write to WAV file
-                    wav_file.writeframes(audio_int16.tobytes())
+                    # Write to WAV file (audio_data is already int16)
+                    wav_file.writeframes(audio_data.tobytes())
 
                     if not is_recording:
                         # Close WAV file
@@ -560,11 +557,21 @@ class AudioManager:
         """Cleanup resources"""
         print("🧹 Cleaning up AudioManager...")
         
-        # Set shutdown flag to prevent callbacks during cleanup
-        self.__shutting_down = True
-        # Clear callbacks to prevent further GUI updates
-        self.__level_callback = None
-        self.__waveform_callback = None
+        # Set shutdown flag and clear callbacks FIRST to prevent new callbacks
+        with self._lock:
+            self.__shutting_down = True
+            # Clear callbacks to prevent further GUI updates
+            self.__level_callback = None
+            self.__waveform_callback = None
+        
+        # Shutdown thread pools with timeout to ensure clean termination
+        try:
+            print("🔄 Shutting down thread pools...")
+            self._callback_thread_pool.shutdown(wait=False)
+            self._bg_thread_pool.shutdown(wait=False)
+            print("✅ Background thread pool shut down requested")
+        except Exception as e:
+            print(f"Error shutting down thread pools: {e}")
         
         if self.__is_recording:
             self.stop_recording()
@@ -572,7 +579,7 @@ class AudioManager:
         with self._lock:
             self.__stop_all_streams()
         
-        # Small delay to let any pending callbacks finish
+        # Small delay to let any pending operations finish
         import time
         time.sleep(0.1)
         
