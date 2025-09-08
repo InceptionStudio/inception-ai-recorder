@@ -316,6 +316,14 @@ class AudioManager:
         # Device labels
         self.__device_labels: Dict[int, str] = {}
         
+        # Device gain settings (in dB)
+        self.__device_gains: Dict[int, float] = {}
+        
+        # Peak level tracking for auto gain
+        self.__device_peak_levels: Dict[int, float] = {}  # Peak level (0.0 to 1.0)
+        self.__device_peak_counts: Dict[int, int] = {}    # How many times peak was hit
+        self.__device_sample_counts: Dict[int, int] = {}  # Total samples processed
+        
         # Export directory
         self.__export_directory: Optional[Path] = None
         
@@ -348,6 +356,11 @@ class AudioManager:
             export_dir = self.__settings_manager.get_export_directory()
             if export_dir:
                 self.set_export_directory(export_dir)
+            else:
+                # If no export directory is set, use the default Downloads folder
+                from platformdirs import user_downloads_path
+                default_dir = str(user_downloads_path())
+                self.set_export_directory(default_dir)
             
             # Load session title
             session_title = self.__settings_manager.get_session_title()
@@ -359,6 +372,10 @@ class AudioManager:
                 label = self.__settings_manager.get_device_label(device.id)
                 if label:
                     self.__device_labels[device.id] = label
+                
+                # Load device gains
+                gain = self.__settings_manager.get_device_gain(device.id)
+                self.__device_gains[device.id] = gain
             
             # Load Google Drive settings
             self.__upload_to_drive = self.__settings_manager.get_google_drive_enabled()
@@ -423,6 +440,8 @@ class AudioManager:
                     )
                     self.__input_devices.append(device)
                     self.__selected_devices[i] = False
+                    # Initialize peak tracking for new device
+                    self.__reset_device_peak_tracking(i)
                     
             except Exception as e:
                 print(f"Error loading device {i}: {e}")
@@ -515,6 +534,8 @@ class AudioManager:
                     should_start = True
                 elif not selected and was_selected:
                     should_stop = True
+                    # Reset peak tracking when device is deselected
+                    self.__reset_device_peak_tracking(device_id)
         
         # Start or stop stream outside of lock to avoid deadlock
         if should_start:
@@ -563,6 +584,66 @@ class AudioManager:
         
         # Save to settings
         self.__settings_manager.set_device_label(device_id, "")
+    
+    def set_device_gain(self, device_id: int, gain_db: float):
+        """Set gain for device in dB"""
+        with self._lock:
+            self.__device_gains[device_id] = gain_db
+        
+        # Save to settings
+        self.__settings_manager.set_device_gain(device_id, gain_db)
+    
+    def get_device_gain(self, device_id: int) -> float:
+        """Get gain for device in dB"""
+        with self._lock:
+            return self.__device_gains.get(device_id, 0.0)
+    
+    def __reset_device_peak_tracking(self, device_id: int):
+        """Reset peak tracking for a device"""
+        self.__device_peak_levels[device_id] = 0.0
+        self.__device_peak_counts[device_id] = 0
+        self.__device_sample_counts[device_id] = 0
+    
+    def get_device_peak_info(self, device_id: int) -> tuple[float, int, int]:
+        """Get peak tracking info: (peak_level, peak_count, sample_count)"""
+        with self._lock:
+            return (
+                self.__device_peak_levels.get(device_id, 0.0),
+                self.__device_peak_counts.get(device_id, 0),
+                self.__device_sample_counts.get(device_id, 0)
+            )
+    
+    def calculate_auto_gain(self, device_id: int) -> Optional[float]:
+        """Calculate optimal gain based on peak levels and clipping detection"""
+        with self._lock:
+            peak_level = self.__device_peak_levels.get(device_id, 0.0)
+            peak_count = self.__device_peak_counts.get(device_id, 0)
+            sample_count = self.__device_sample_counts.get(device_id, 0)
+        
+        if sample_count == 0 or peak_level == 0.0:
+            return None  # No data to work with
+        
+        # Calculate clipping percentage
+        clipping_percentage = (peak_count / sample_count) * 100.0 if sample_count > 0 else 0.0
+        
+        # Target level (aim for -3dB headroom)
+        target_level = 0.708  # -3dB in linear scale
+        
+        # Calculate required gain
+        if peak_level > 0.0:
+            required_gain_linear = target_level / peak_level
+            required_gain_db = 20.0 * np.log10(required_gain_linear)
+            
+            # Apply clipping penalty - reduce gain if clipping detected
+            if clipping_percentage > 1.0:  # More than 1% clipping
+                clipping_penalty = min(6.0, clipping_percentage * 2.0)  # Up to 6dB penalty
+                required_gain_db -= clipping_penalty
+            
+            # Don't apply if gain would be too high (>24dB) or too low (<-24dB)
+            if -24.0 <= required_gain_db <= 24.0:
+                return float(required_gain_db)  # Convert numpy float32 to Python float
+        
+        return None
     
     def set_export_directory(self, directory: str):
         """Set the export directory for recordings"""
@@ -760,7 +841,16 @@ class AudioManager:
                             except queue.Full:
                                 pass  # Drop data if queue is full
 
-                    self._bg_thread_pool.submit(_bg_audio_callback_ops)
+                    # Only submit to thread pool if not shutting down
+                    if self.__shutting_down:
+                        print(f"Shutting down, returning paAbort")
+                        return (in_data, pyaudio.paAbort)
+                        
+                    try:
+                        self._bg_thread_pool.submit(_bg_audio_callback_ops)
+                    except RuntimeError:
+                        # Thread pool is shut down, ignore the error
+                        pass
 
                     return (in_data, pyaudio.paContinue)
                 
@@ -1030,6 +1120,7 @@ class AudioManager:
         while True:
             wav_file = None
             is_recording = False
+            gain_db = 0.0
             with self._lock:
                 audio_queue = self.__audio_data_queues.get(device_id)
                 if not audio_queue:
@@ -1041,6 +1132,7 @@ class AudioManager:
                 if not is_recording and wav_file is not None:
                     print(f"BGThread({device_id}): Getting ready to close file")
                     self.__recording_files.pop(device_id, None)
+                gain_db = self.__device_gains.get(device_id, 0.0)
             
             try:
                 # Get audio data from queue with timeout
@@ -1048,6 +1140,32 @@ class AudioManager:
                 if audio_data is STOP:
                     print(f"BGThread({device_id}): Exiting gracefully")
                     return
+                
+                # Track peak levels (before gain adjustment)
+                if not self.__shutting_down:
+                    # Calculate peak level in this chunk
+                    chunk_peak = np.max(np.abs(audio_data.astype(np.float32))) / 32767.0
+                    
+                    # Update peak tracking
+                    with self._lock:
+                        if device_id in self.__listening_streams:
+                            current_peak = self.__device_peak_levels.get(device_id, 0.0)
+                            if chunk_peak > current_peak:
+                                self.__device_peak_levels[device_id] = float(chunk_peak)
+                            
+                            # Count samples at peak level (for clipping detection)
+                            if chunk_peak >= 0.99:  # Near maximum
+                                self.__device_peak_counts[device_id] = self.__device_peak_counts.get(device_id, 0) + 1
+                            
+                            # Increment sample count
+                            self.__device_sample_counts[device_id] = self.__device_sample_counts.get(device_id, 0) + 1
+                
+                # Apply gain adjustment
+                if gain_db != 0.0:
+                    # Convert dB to linear gain
+                    gain_linear = 10.0 ** (gain_db / 20.0)
+                    # Apply gain and clip to prevent overflow
+                    audio_data = np.clip(audio_data.astype(np.float32) * gain_linear, -32767, 32767).astype(np.int16)
                 
                 # Process callbacks
                 level_cb = None
@@ -1072,7 +1190,11 @@ class AudioManager:
                                     level_cb(device_id, scaled_rms)
                             except Exception as e:
                                 print(f"BGThread({device_id}): Error during level callback: {e}")
-                        self._callback_thread_pool.submit(_level_cb_task)
+                        try:
+                            self._callback_thread_pool.submit(_level_cb_task)
+                        except RuntimeError:
+                            # Thread pool is shut down, ignore the error
+                            pass
                 else:
                     print(f"BGThread({device_id}): No level callback")
 
@@ -1094,7 +1216,11 @@ class AudioManager:
                                     waveform_cb(device_id, scaled_waveform)
                             except Exception as e:
                                 print(f"BGThread({device_id}): Error during waveform callback: {e}")
-                        self._callback_thread_pool.submit(_waveform_cb_task)
+                        try:
+                            self._callback_thread_pool.submit(_waveform_cb_task)
+                        except RuntimeError:
+                            # Thread pool is shut down, ignore the error
+                            pass
                 else:
                     print(f"BGThread({device_id}): No waveform callback")
 

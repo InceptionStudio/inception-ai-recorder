@@ -32,6 +32,9 @@ class WaveformWidget:
         self.axis.set_xticks([])
         self.axis.set_yticks([])
         
+        # Remove margins to eliminate black horizontal bars
+        self.figure.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        
         # Initialize empty line for waveform
         self.line, = self.axis.plot([], [], 'g-', linewidth=1.5)
         
@@ -118,7 +121,7 @@ class DeviceRow:
         device_label = ttk.Label(info_frame, text=device.name, font=('Courier', 10))
         device_label.pack(anchor=tk.W)
         
-        channels_label = ttk.Label(info_frame, text=f"Channels: {device.max_input_channels}", 
+        channels_label = ttk.Label(info_frame, text=f"{device.host_api}, ID {device.id}", 
                                  font=('Arial', 8), foreground='gray')
         channels_label.pack(anchor=tk.W)
         
@@ -134,6 +137,37 @@ class DeviceRow:
         self.label_entry.pack(side=tk.LEFT, padx=2)
         self.label_entry.bind('<KeyRelease>', self.on_label_changed)
         
+        # Gain control
+        gain_frame = ttk.Frame(control_frame)
+        gain_frame.pack(fill=tk.X, pady=2)
+        
+        ttk.Label(gain_frame, text="Gain:", font=('Arial', 8)).pack(side=tk.LEFT)
+        
+        self.gain_var = tk.DoubleVar()
+        self.gain_var.set(audio_manager.get_device_gain(device.id))
+        self.gain_slider = ttk.Scale(
+            gain_frame,
+            from_=-24.0,
+            to=24.0,
+            orient=tk.HORIZONTAL,
+            variable=self.gain_var,
+            command=self.on_gain_changed,
+            length=120
+        )
+        self.gain_slider.pack(side=tk.LEFT, padx=2)
+        
+        self.gain_label = ttk.Label(gain_frame, text="0.0 dB", font=('Arial', 8), width=5)
+        self.gain_label.pack(side=tk.LEFT, padx=2)
+        
+        # Auto gain label (clickable)
+        self.auto_gain_label = ttk.Label(gain_frame, text="Auto", font=('Arial', 8), 
+                                        foreground='blue', cursor='hand2')
+        self.auto_gain_label.bind('<Button-1>', self.on_auto_gain_clicked)
+        self.auto_gain_label.pack(side=tk.LEFT, padx=1)
+        
+        # Initialize gain label display
+        self.on_gain_changed()
+        
         # Right side - waveform and level
         self.waveform_widget = WaveformWidget(self.frame, device.id, device.name)
         self.waveform_widget.frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5)
@@ -143,15 +177,49 @@ class DeviceRow:
         selected = self.selected_var.get()
         self.audio_manager.set_device_selected(self.device.id, selected)
         
-        # Enable/disable waveform based on selection
-        if selected:
-            self.waveform_widget.axis.set_facecolor('black')
-        else:
-            self.waveform_widget.axis.set_facecolor('gray')
+        # Clear waveform and level when deselected
+        if not selected:
             self.waveform_widget.update_waveform([])
             self.waveform_widget.update_level(0.0)
         
         self.waveform_widget.canvas.draw_idle()
+    
+    def on_gain_changed(self, value=None):
+        """Handle gain slider change"""
+        gain_db = self.gain_var.get()
+        self.audio_manager.set_device_gain(self.device.id, gain_db)
+        # Update the gain label display
+        self.gain_label.config(text=f"{gain_db:.1f} dB")
+    
+    def on_auto_gain_clicked(self, event=None):
+        """Handle auto gain label click"""
+        # Calculate optimal gain based on peak levels
+        optimal_gain = self.audio_manager.calculate_auto_gain(self.device.id)
+        
+        if optimal_gain is not None:
+            # Apply the calculated gain
+            self.gain_var.set(optimal_gain)
+            self.audio_manager.set_device_gain(self.device.id, optimal_gain)
+            self.gain_label.config(text=f"{optimal_gain:.1f} dB")
+            
+            # Show feedback message
+            peak_level, peak_count, sample_count = self.audio_manager.get_device_peak_info(self.device.id)
+            clipping_pct = (peak_count / sample_count * 100) if sample_count > 0 else 0
+            
+            if clipping_pct > 1.0:
+                message = f"Auto gain set to {optimal_gain:.1f} dB\nPeak: {peak_level:.1%}, Clipping: {clipping_pct:.1f}%"
+            else:
+                message = f"Auto gain set to {optimal_gain:.1f} dB\nPeak level: {peak_level:.1%}"
+            
+            # Show tooltip or status message (you could implement a status bar)
+            print(f"Auto gain for device {self.device.id}: {message}")
+        else:
+            # No data available or gain would be too extreme
+            peak_level, peak_count, sample_count = self.audio_manager.get_device_peak_info(self.device.id)
+            if sample_count == 0:
+                print("No audio data available for auto gain calculation")
+            else:
+                print(f"Auto gain not applied - peak level: {peak_level:.1%}, would require extreme gain adjustment")
     
     def on_label_changed(self, event=None):
         """Handle label text change"""
@@ -168,6 +236,9 @@ class DeviceRow:
         """Enable or disable device controls"""
         state = "normal" if enabled else "disabled"
         self.checkbox.config(state=state)
+        # Keep gain slider and auto label enabled during recording for real-time adjustment
+        # self.gain_slider.config(state=state)
+        # self.auto_gain_label remains enabled during recording
         self.label_entry.config(state=state)
 
 class ConfigurationDialog:
@@ -564,7 +635,7 @@ class MultitrackRecorderGUI:
             messagebox.showerror("Error", f"Failed to open configuration dialog: {e}")
     
     def setup_styles(self):
-        """Set up custom styles for progressbars"""
+        """Set up custom styles for progressbars and buttons"""
         style = ttk.Style()
         
         # Configure colored progressbar styles
@@ -643,10 +714,10 @@ class MultitrackRecorderGUI:
         
         self.record_button = ttk.Button(recording_frame, text="Start Recording", 
                                       command=self.toggle_recording)
-        self.record_button.pack(side=tk.LEFT)
+        self.record_button.pack()
         
         self.recording_status = ttk.Label(recording_frame, text="")
-        self.recording_status.pack(side=tk.LEFT, padx=10)
+        self.recording_status.pack(pady=(5, 0))
     
     def populate_devices(self):
         """Populate device list"""

@@ -26,15 +26,19 @@ class SettingsManager:
         self._auto_save = True
         
         # Default settings
+        from platformdirs import user_downloads_path
+        downloads_path = str(user_downloads_path())
+        
         self._default_settings = {
             "google_drive": {
                 "enabled": False,
                 "folder_id": "",
                 "authenticated": False
             },
-            "export_directory": "",
+            "export_directory": downloads_path,
             "session_title": "",
             "device_labels": {},
+            "device_gains": {},  # Device gain settings in dB
             "window_geometry": "900x600",
             "last_used_devices": [],
             "uploaded_files": {}  # Track uploaded files by file path and modification time
@@ -184,6 +188,17 @@ class SettingsManager:
         else:
             labels.pop(str(device_id), None)
         return self.set_setting("device_labels", labels)
+    
+    def get_device_gain(self, device_id: int) -> float:
+        """Get device gain setting in dB"""
+        gains = self.get_setting("device_gains", {})
+        return gains.get(str(device_id), 0.0)
+    
+    def set_device_gain(self, device_id: int, gain_db: float) -> bool:
+        """Set device gain setting in dB"""
+        gains = self.get_setting("device_gains", {})
+        gains[str(device_id)] = gain_db
+        return self.set_setting("device_gains", gains)
     
     def get_last_used_devices(self) -> list:
         """Get last used device IDs"""
