@@ -7,9 +7,13 @@ setup(
     author="John Whaley",
     packages=find_packages(),
     install_requires=[
-        "PyAudio>=0.2.11",
+        "PyAudio>=0.2.14",
         "numpy>=1.21.0",
         "matplotlib>=3.5.0",
+        "google-api-python-client>=2.0.0",
+        "google-auth-httplib2>=0.1.0",
+        "google-auth-oauthlib>=0.5.0",
+        "platformdirs>=3.0.0",
     ],
     python_requires=">=3.8",
     classifiers=[

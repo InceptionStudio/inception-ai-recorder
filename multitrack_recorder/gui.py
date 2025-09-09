@@ -621,6 +621,23 @@ class MultitrackRecorderGUI:
         self.root = tk.Tk()
         self.root.title("Multitrack Audio Recorder")
         
+        # Set custom icon
+        try:
+            base_dir = os.path.dirname(os.path.dirname(__file__))
+            png_path = os.path.join(base_dir, 'app_icon.png')
+            
+            # Try PNG first (works better on macOS)
+            if os.path.exists(png_path):
+                from PIL import Image, ImageTk
+                icon_image = Image.open(png_path)
+                icon_photo = ImageTk.PhotoImage(icon_image)
+                self.root.iconphoto(True, icon_photo)
+                print(f"✅ Set custom icon from PNG: {png_path}")
+            else:
+                print("⚠️ No custom icon files found")
+        except Exception as e:
+            print(f"Warning: Could not set custom icon: {e}")
+        
         # Initialize settings manager
         self.settings_manager = SettingsManager()
         

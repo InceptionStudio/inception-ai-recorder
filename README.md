@@ -11,10 +11,13 @@ A Python port of the [multitrack-recorder-swift](https://github.com/joewhaley/mu
 - **Device Refresh**: Dynamically refresh the input device list without restarting the app
 
 ### 🎵 Audio Features
-- **High-Quality Recording**: 44.1kHz sample rate with 16-bit precision
-- **WAV File Output**: Industry-standard WAV format with proper headers
+- **High-Quality Recording**: 48kHz sample rate with 32-bit float precision
+- **Multiple Output Formats**: WAV (uncompressed), MP3 (compressed), or Opus (highly compressed)
 - **Streaming Recording**: Real-time audio streaming to disk for efficient memory usage
 - **Individual Device Control**: Start/stop recording for each device independently
+- **Gain Control**: Individual gain adjustment (-24dB to +24dB) for each device
+- **Auto Gain**: Intelligent automatic gain adjustment based on peak levels
+- **Peak Monitoring**: Real-time peak level tracking and clipping detection
 
 ### 🎨 User Interface
 - **Cross-Platform GUI**: Built with tkinter for compatibility across operating systems
@@ -22,11 +25,24 @@ A Python port of the [multitrack-recorder-swift](https://github.com/joewhaley/mu
 - **Audio Level Meters**: Live monitoring of input levels with color-coded indicators
 - **Device Labeling**: Add custom labels to identify your audio devices
 - **Responsive Design**: Scrollable interface that works with any number of devices
+- **Custom Icon**: Professional microphone icon in dock/taskbar
+- **Configuration Dialog**: Easy access to export settings and Google Drive configuration
+- **Session Management**: Optional session titles for organized recording sessions
 
 ### 🔧 Technical Features
 - **Thread-Safe Audio Processing**: Robust audio callback handling with proper thread management
 - **Memory Efficient**: Streaming audio data directly to disk without excessive memory usage
 - **Cross-Platform**: Works on Windows, macOS, and Linux
+- **Persistent Settings**: Automatic saving of device labels, gains, and preferences
+- **Google Drive Integration**: Automatic upload of recordings to Google Drive
+- **Settings Management**: Comprehensive settings system with auto-save functionality
+
+### ☁️ Cloud Integration
+- **Google Drive Upload**: Automatic upload of recordings to Google Drive folders
+- **Multiple Output Formats**: Choose between WAV, MP3, or Opus for cloud uploads
+- **OAuth2 Authentication**: Secure Google Drive authentication with token management
+- **Folder Validation**: Verify Google Drive folder access before recording
+- **Shared Drive Support**: Works with both personal and Google Shared Drives
 
 ## Requirements
 
@@ -35,9 +51,13 @@ A Python port of the [multitrack-recorder-swift](https://github.com/joewhaley/mu
 - **Audio Devices**: Any audio input device compatible with your operating system
 
 ### Python Dependencies
-- PyAudio (0.2.11+)
+- PyAudio (0.2.14+)
 - numpy (1.21.0+)
 - matplotlib (3.5.0+)
+- google-api-python-client (2.0.0+) - For Google Drive integration
+- google-auth-httplib2 (0.1.0+) - For Google authentication
+- google-auth-oauthlib (0.5.0+) - For OAuth2 authentication
+- platformdirs (3.0.0+) - For cross-platform directory handling
 - tkinter (included with Python)
 
 ## Installation
@@ -75,7 +95,7 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 # Install dependencies
 # Note: On macOS with Apple Silicon, you may need special PyAudio installation:
 pip install --global-option='build_ext' --global-option='-I/opt/homebrew/include' --global-option='-L/opt/homebrew/lib' pyaudio
-pip install numpy matplotlib
+pip install -r requirements.txt
 ```
 
 ### Step 3: Install the Package (Optional)
@@ -106,27 +126,36 @@ python -m multitrack_recorder.main
 ### Getting Started
 
 1. **Launch the Application**: Run the application using one of the methods above
-2. **Select Export Directory**: Click "Choose Export Folder" to select where recordings will be saved
-3. **Enable Devices**: Check the boxes next to the audio devices you want to record from
-4. **Add Labels** (Optional): Add custom labels to identify your devices
-5. **Monitor Audio**: Watch the real-time waveforms and level meters for each device
-6. **Start Recording**: Click "Start Recording" to begin capturing audio from all selected devices
-7. **Stop Recording**: Click "Stop Recording" to finalize your WAV files
+2. **Configure Settings**: Click "Configuration" to set up export directory and Google Drive (optional)
+3. **Select Export Directory**: Choose where recordings will be saved locally
+4. **Enable Devices**: Check the boxes next to the audio devices you want to record from
+5. **Add Labels** (Optional): Add custom labels to identify your devices
+6. **Adjust Gain** (Optional): Use the gain sliders or "Auto" button to optimize audio levels
+7. **Set Session Title** (Optional): Add a title for organized recording sessions
+8. **Monitor Audio**: Watch the real-time waveforms and level meters for each device
+9. **Start Recording**: Click "Start Recording" to begin capturing audio from all selected devices
+10. **Stop Recording**: Click "Stop Recording" to finalize your files (automatically uploaded to Google Drive if configured)
 
 ### Device Management
 
 - **Refresh Devices**: Click "Refresh" to update the list of available audio devices (detects newly connected/disconnected devices)
 - **Add Labels**: Enter custom names in the label field next to each device
+- **Gain Control**: Adjust individual gain levels (-24dB to +24dB) for each device
+- **Auto Gain**: Click "Auto" to automatically calculate optimal gain based on peak levels
 - **Individual Control**: Each device can be enabled/disabled independently
 - **Real-time Monitoring**: Audio levels and waveforms update in real-time
+- **Peak Tracking**: Monitor peak levels and clipping detection for each device
 - **Hot-plugging**: Use refresh to detect USB audio devices that are connected after startup
 
 ### Recording Features
 
 - **Simultaneous Recording**: All selected devices record simultaneously
-- **Individual Files**: Each device creates its own WAV file
+- **Individual Files**: Each device creates its own audio file
+- **Multiple Formats**: Choose between WAV, MP3, or Opus output formats
 - **File Naming**: Files are automatically named with device labels and timestamps
+- **Session Organization**: Optional session titles create organized folder structures
 - **Streaming**: Audio is written to disk in real-time for efficient memory usage
+- **Google Drive Upload**: Automatic cloud backup of recordings (optional)
 
 ## File Structure
 
@@ -135,7 +164,18 @@ multitrack_recorder/
 ├── __init__.py                 # Package initialization
 ├── main.py                     # Main entry point
 ├── audio_manager.py            # Core audio management and PyAudio integration
-└── gui.py                      # GUI components and layout
+├── gui.py                      # GUI components and layout
+└── settings_manager.py         # Settings management and persistence
+
+# Additional files
+├── app_icon.png                # Custom application icon
+├── app_icon.ico                # Windows icon format
+├── settings.json               # User settings and preferences
+├── credentials.json            # Google Drive OAuth2 credentials (user-provided)
+├── token.pickle                # Google Drive authentication token
+├── requirements.txt            # Python dependencies
+├── setup.py                    # Package installation script
+└── GOOGLE_DRIVE_SETUP.md       # Google Drive setup guide
 ```
 
 ## Technical Details
@@ -149,11 +189,13 @@ multitrack_recorder/
 
 ### Audio Processing
 
-- **Sample Rate**: 44.1kHz
-- **Bit Depth**: 16-bit signed integer
+- **Sample Rate**: 48kHz
+- **Bit Depth**: 32-bit float (internal), 32-bit PCM (WAV output)
 - **Channels**: Mono (1 channel per device)
 - **Buffer Size**: 1024 frames
-- **Format**: WAV (RIFF PCM)
+- **Formats**: WAV (RIFF PCM), MP3 (compressed), Opus (highly compressed)
+- **Gain Range**: -24dB to +24dB per device
+- **Peak Monitoring**: Real-time clipping detection and level tracking
 
 ### Thread Safety
 
@@ -161,6 +203,23 @@ multitrack_recorder/
 - **UI Updates**: Scheduled on main thread for thread safety
 - **File I/O**: Background thread processing to prevent audio dropouts
 - **Queue-based Communication**: Thread-safe data passing between audio and recording threads
+
+## Google Drive Setup
+
+For automatic cloud backup of your recordings, you can configure Google Drive integration:
+
+1. **Follow the Setup Guide**: See [GOOGLE_DRIVE_SETUP.md](GOOGLE_DRIVE_SETUP.md) for detailed instructions
+2. **Get Credentials**: Download OAuth2 credentials from Google Cloud Console
+3. **Configure in App**: Use the Configuration dialog to set up Google Drive folder
+4. **Choose Format**: Select output format (WAV, MP3, or Opus) for cloud uploads
+5. **Automatic Upload**: Recordings are automatically uploaded after each session
+
+### Google Drive Features
+- **OAuth2 Authentication**: Secure, token-based authentication
+- **Folder Validation**: Verify folder access before recording
+- **Shared Drive Support**: Works with Google Shared Drives
+- **Multiple Formats**: Different formats for local vs. cloud storage
+- **Automatic Upload**: Background upload after recording stops
 
 ## Troubleshooting
 
@@ -191,6 +250,18 @@ multitrack_recorder/
 - Check that all dependencies are properly installed
 - Try running from command line to see error messages
 - Ensure PortAudio is compatible with your system
+
+**Google Drive Issues**:
+- Ensure `credentials.json` is in the application directory
+- Check that Google Drive API is enabled in your Google Cloud project
+- Verify folder ID is correct (use the Validate button)
+- Try clearing authentication and re-authenticating
+- Check internet connection for uploads
+
+**Gain Control Issues**:
+- Use "Auto" gain for optimal levels based on current audio
+- Monitor peak levels to avoid clipping
+- Adjust gain during recording for real-time optimization
 
 **Refresh Button Issues**:
 - ✅ **Crash Protection**: Refresh is now crash-resistant and handles GIL-related threading issues
