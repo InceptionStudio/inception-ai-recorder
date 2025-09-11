@@ -13,7 +13,7 @@ import os
 package_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(package_dir))
 
-def main():
+def main() -> None:
     """Main entry point for the application"""
     try:
         from multitrack_recorder.gui import MultitrackRecorderGUI

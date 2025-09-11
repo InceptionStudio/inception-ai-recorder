@@ -10,14 +10,14 @@ import threading
 import signal
 import sys
 import os
-from typing import Dict, List
+from typing import Dict, List, Any
 from .audio_manager import AudioManager, AudioDevice
 from .settings_manager import SettingsManager
 
 class WaveformWidget:
     """Widget for displaying waveform and level meter"""
     
-    def __init__(self, parent, device_id: str, device_name: str):
+    def __init__(self, parent: tk.Widget, device_id: str, device_name: str) -> None:
         self.device_id = device_id
         self.device_name = device_name
         
@@ -57,7 +57,7 @@ class WaveformWidget:
         self.update_waveform([])
         self.update_level(0.0)
     
-    def update_waveform(self, data: List[float]):
+    def update_waveform(self, data: List[float]) -> None:
         """Update waveform display"""
         if data:
             x_data = np.linspace(0, 100, len(data))
@@ -71,7 +71,7 @@ class WaveformWidget:
         except:
             pass  # Ignore drawing errors
     
-    def update_level(self, level: float):
+    def update_level(self, level: float) -> None:
         """Update level meter"""
         level_percent = min(100.0, level * 100.0)
         self.level_var.set(level_percent)
@@ -92,7 +92,7 @@ class WaveformWidget:
 class DeviceRow:
     """Represents a single device row in the GUI"""
     
-    def __init__(self, parent, device: AudioDevice, audio_manager: AudioManager):
+    def __init__(self, parent: tk.Widget, device: AudioDevice, audio_manager: AudioManager) -> None:
         self.device = device
         self.audio_manager = audio_manager
         
@@ -178,7 +178,7 @@ class DeviceRow:
         self.waveform_widget = WaveformWidget(self.frame, device.id, device.name)
         self.waveform_widget.frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
     
-    def on_selection_changed(self):
+    def on_selection_changed(self) -> None:
         """Handle device selection change"""
         selected = self.selected_var.get()
         self.audio_manager.set_device_selected(self.device.id, selected)
@@ -190,14 +190,14 @@ class DeviceRow:
         
         self.waveform_widget.canvas.draw_idle()
     
-    def on_gain_changed(self, value=None):
+    def on_gain_changed(self, value: Any = None) -> None:
         """Handle gain slider change"""
         gain_db = self.gain_var.get()
         self.audio_manager.set_device_gain(self.device.id, gain_db)
         # Update the gain label display
         self.gain_label.config(text=f"{gain_db:.1f} dB")
     
-    def on_auto_gain_clicked(self, event=None):
+    def on_auto_gain_clicked(self, event: Any = None) -> None:
         """Handle auto gain label click"""
         # Calculate optimal gain based on peak levels
         optimal_gain = self.audio_manager.calculate_auto_gain(self.device.id)
@@ -227,18 +227,18 @@ class DeviceRow:
             else:
                 print(f"Auto gain not applied - peak level: {peak_level:.1%}, would require extreme gain adjustment")
     
-    def on_label_changed(self, event=None):
+    def on_label_changed(self, event: Any = None) -> None:
         """Handle label text change"""
         label = self.label_var.get()
         self.audio_manager.set_device_label(self.device.id, label)
     
-    def update_audio_data(self, level: float, waveform: List[float]):
+    def update_audio_data(self, level: float, waveform: List[float]) -> None:
         """Update audio level and waveform"""
         if self.selected_var.get():  # Only update if device is selected
             self.waveform_widget.update_level(level)
             self.waveform_widget.update_waveform(waveform)
     
-    def set_controls_enabled(self, enabled: bool):
+    def set_controls_enabled(self, enabled: bool) -> None:
         """Enable or disable device controls"""
         state = "normal" if enabled else "disabled"
         self.checkbox.config(state=state)
@@ -250,7 +250,7 @@ class DeviceRow:
 class ConfigurationDialog:
     """Configuration dialog for export folder and Google Drive settings"""
     
-    def __init__(self, parent, audio_manager: AudioManager, settings_manager: SettingsManager):
+    def __init__(self, parent: tk.Tk, audio_manager: AudioManager, settings_manager: SettingsManager) -> None:
         self.audio_manager = audio_manager
         self.settings_manager = settings_manager
         self._initializing = True
@@ -277,7 +277,7 @@ class ConfigurationDialog:
         # Set up cleanup on dialog close
         self.dialog.protocol("WM_DELETE_WINDOW", self.on_closing)
     
-    def create_widgets(self):
+    def create_widgets(self) -> None:
         """Create the configuration dialog widgets"""
         # Main container with padding
         main_frame = ttk.Frame(self.dialog, padding=20)
@@ -388,7 +388,7 @@ class ConfigurationDialog:
         # Close button
         ttk.Button(buttons_frame, text="Close", command=self.on_closing).pack(side=tk.RIGHT)
     
-    def load_settings(self):
+    def load_settings(self) -> None:
         """Load current settings into the dialog"""
         try:
             # Load export directory
@@ -413,14 +413,14 @@ class ConfigurationDialog:
         except Exception as e:
             print(f"Error loading settings in configuration dialog: {e}")
     
-    def choose_export_directory(self):
+    def choose_export_directory(self) -> None:
         """Choose export directory"""
         directory = filedialog.askdirectory(title="Select Export Folder")
         if directory:
             self.audio_manager.set_export_directory(directory)
             self.export_label.config(text=f"Export to: {directory}", foreground='black')
     
-    def on_drive_enabled_changed(self):
+    def on_drive_enabled_changed(self) -> None:
         """Handle Google Drive enabled checkbox change"""
         enabled = self.drive_enabled_var.get()
         
@@ -438,7 +438,7 @@ class ConfigurationDialog:
         # Also enable/disable output format dropdown
         self.output_format_combo.config(state=state)
     
-    def on_output_format_changed(self, event=None):
+    def on_output_format_changed(self, event: Any = None) -> None:
         """Handle output format dropdown change"""
         output_format = self.output_format_var.get()
         
@@ -446,7 +446,7 @@ class ConfigurationDialog:
         if not self._initializing:
             self.audio_manager.set_google_drive_output_format(output_format)
     
-    def on_folder_id_changed(self, event=None):
+    def on_folder_id_changed(self, event: Any = None) -> None:
         """Handle Google Drive folder ID change"""
         folder_id = self.folder_id_var.get().strip()
         if folder_id and not self._initializing:
@@ -454,7 +454,7 @@ class ConfigurationDialog:
             # Clear status when typing
             self.folder_status_label.config(text="", foreground='black')
     
-    def validate_folder_id(self):
+    def validate_folder_id(self) -> None:
         """Validate the Google Drive folder ID"""
         folder_id = self.folder_id_var.get().strip()
         
@@ -472,12 +472,12 @@ class ConfigurationDialog:
         self.dialog.update_idletasks()
         
         # Validate in background thread
-        def validate_task():
+        def validate_task() -> None:
             try:
                 is_valid, message = self.audio_manager.validate_google_drive_folder_id(folder_id)
                 
                 # Update UI in main thread
-                def update_ui():
+                def update_ui() -> None:
                     if is_valid:
                         self.folder_status_label.config(text=message, foreground='green')
                         self.audio_manager.set_google_drive_folder_id(folder_id)
@@ -489,7 +489,7 @@ class ConfigurationDialog:
                 self.dialog.after_idle(update_ui)
                 
             except Exception as e:
-                def update_ui_error():
+                def update_ui_error() -> None:
                     self.folder_status_label.config(text=f"Validation error: {e}", foreground='red')
                     self.validate_folder_button.config(text="Validate", state="normal")
                 
@@ -498,7 +498,7 @@ class ConfigurationDialog:
         # Run validation in background thread
         threading.Thread(target=validate_task, daemon=True).start()
     
-    def authenticate_google_drive(self):
+    def authenticate_google_drive(self) -> None:
         """Authenticate with Google Drive"""
         try:
             # Check if credentials file exists
@@ -518,12 +518,12 @@ class ConfigurationDialog:
             self.dialog.update_idletasks()
             
             # Authenticate in a background thread
-            def auth_task():
+            def auth_task() -> None:
                 try:
                     success = self.audio_manager.authenticate_google_drive()
                     
                     # Update UI in main thread
-                    def update_ui():
+                    def update_ui() -> None:
                         if success:
                             self.auth_status_label.config(text="Authenticated", foreground='green')
                             messagebox.showinfo("Success", "Google Drive authentication successful!")
@@ -539,7 +539,7 @@ class ConfigurationDialog:
                     self.dialog.after_idle(update_ui)
                     
                 except Exception as e:
-                    def update_ui_error():
+                    def update_ui_error() -> None:
                         self.auth_status_label.config(text="Authentication failed", foreground='red')
                         self.auth_button.config(text="Authenticate Google Drive", state="normal")
                         messagebox.showerror("Error", f"Google Drive authentication failed: {e}")
@@ -553,7 +553,7 @@ class ConfigurationDialog:
             self.auth_button.config(text="Authenticate Google Drive", state="normal")
             messagebox.showerror("Error", f"Failed to start authentication: {e}")
     
-    def clear_google_drive_auth(self):
+    def clear_google_drive_auth(self) -> None:
         """Clear Google Drive authentication"""
         try:
             result = messagebox.askyesno("Clear Authentication", 
@@ -576,7 +576,7 @@ class ConfigurationDialog:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to clear authentication: {e}")
     
-    def update_google_drive_ui_state(self):
+    def update_google_drive_ui_state(self) -> None:
         """Update Google Drive UI state based on current settings"""
         try:
             # Update checkbox state from settings
@@ -609,7 +609,7 @@ class ConfigurationDialog:
         except Exception as e:
             print(f"Error updating Google Drive UI state: {e}")
     
-    def on_closing(self):
+    def on_closing(self) -> None:
         """Handle dialog closing"""
         self.dialog.grab_release()
         self.dialog.destroy()
@@ -617,7 +617,7 @@ class ConfigurationDialog:
 class MultitrackRecorderGUI:
     """Main GUI application"""
     
-    def __init__(self):
+    def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("Multitrack Audio Recorder")
         
@@ -631,7 +631,7 @@ class MultitrackRecorderGUI:
                 from PIL import Image, ImageTk
                 icon_image = Image.open(png_path)
                 icon_photo = ImageTk.PhotoImage(icon_image)
-                self.root.iconphoto(True, icon_photo)
+                self.root.iconphoto(True, icon_photo)  # type: ignore
                 print(f"✅ Set custom icon from PNG: {png_path}")
             else:
                 print("⚠️ No custom icon files found")
@@ -684,14 +684,14 @@ class MultitrackRecorderGUI:
         # Set up window geometry saving after initialization is complete
         self.root.bind('<Configure>', self.on_window_configure)
     
-    def open_configuration_dialog(self):
+    def open_configuration_dialog(self) -> None:
         """Open the configuration dialog"""
         try:
             ConfigurationDialog(self.root, self.audio_manager, self.settings_manager)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to open configuration dialog: {e}")
     
-    def setup_styles(self):
+    def setup_styles(self) -> None:
         """Set up custom styles for progressbars and buttons"""
         style = ttk.Style()
         
@@ -700,7 +700,7 @@ class MultitrackRecorderGUI:
         style.configure('yellow.Vertical.TProgressbar', background='yellow')
         style.configure('red.Vertical.TProgressbar', background='red')
     
-    def create_widgets(self):
+    def create_widgets(self) -> None:
         """Create the main GUI widgets"""
         # Main title
         title_frame = ttk.Frame(self.root)
@@ -776,7 +776,7 @@ class MultitrackRecorderGUI:
         self.recording_status = ttk.Label(recording_frame, text="")
         self.recording_status.pack(pady=(5, 0))
     
-    def populate_devices(self):
+    def populate_devices(self) -> None:
         """Populate device list"""
         # Clear existing device rows
         for row in self.device_rows.values():
@@ -798,7 +798,7 @@ class MultitrackRecorderGUI:
                                        foreground='red')
             no_devices_label.pack(pady=20)
     
-    def set_device_controls_enabled(self, enabled: bool):
+    def set_device_controls_enabled(self, enabled: bool) -> None:
         """Enable or disable all device controls"""
         for device_row in self.device_rows.values():
             device_row.set_controls_enabled(enabled)
@@ -806,13 +806,13 @@ class MultitrackRecorderGUI:
         if hasattr(self, 'refresh_button'):
             self.refresh_button.config(state="normal" if enabled else "disabled")
     
-    def on_session_title_changed(self, event=None):
+    def on_session_title_changed(self, event: Any = None) -> None:
         """Handle session title change"""
         session_title = self.session_title_var.get().strip()
         if not self._initializing:
             self.audio_manager.set_session_title(session_title)
     
-    def update_session_title_display(self):
+    def update_session_title_display(self) -> None:
         """Update session title display from settings"""
         try:
             session_title = self.settings_manager.get_session_title()
@@ -822,14 +822,14 @@ class MultitrackRecorderGUI:
             print(f"Error updating session title display: {e}")
     
     
-    def on_window_configure(self, event):
+    def on_window_configure(self, event: Any) -> None:
         """Handle window configuration changes (resize, move)"""
         if event.widget == self.root:
             # Save window geometry
             geometry = self.root.geometry()
             self.settings_manager.set_window_geometry(geometry)
     
-    def refresh_devices(self):
+    def refresh_devices(self) -> None:
         """Refresh device list with timeout protection"""
         if self.audio_manager.is_recording():
             messagebox.showwarning("Warning", "Cannot refresh devices while recording")
@@ -880,7 +880,7 @@ class MultitrackRecorderGUI:
             if hasattr(self, 'refresh_button'):
                 self.refresh_button.config(text=original_text, state="normal")
     
-    def toggle_recording(self):
+    def toggle_recording(self) -> None:
         """Toggle recording state"""
         if self.audio_manager.is_recording():
             try:
@@ -911,14 +911,14 @@ class MultitrackRecorderGUI:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to start recording: {e}")
     
-    def on_level_update(self, device_id: str, level: float):
+    def on_level_update(self, device_id: str, level: float) -> None:
         """Handle audio level updates"""
         # Check if we're shutting down or if root window is being destroyed
         try:
             if self._shutting_down or not hasattr(self, 'root') or not self.root.winfo_exists():
                 return
                 
-            def safe_update():
+            def safe_update() -> None:
                 try:
                     # Double-check during execution
                     if (hasattr(self, 'root') and self.root.winfo_exists() and 
@@ -931,14 +931,14 @@ class MultitrackRecorderGUI:
         except Exception as e:
             pass  # Silently ignore callback errors during shutdown
     
-    def on_waveform_update(self, device_id: str, waveform: List[float]):
+    def on_waveform_update(self, device_id: str, waveform: List[float]) -> None:
         """Handle waveform data updates"""
         # Check if we're shutting down or if root window is being destroyed
         try:
             if self._shutting_down or not hasattr(self, 'root') or not self.root.winfo_exists():
                 return
                 
-            def safe_update():
+            def safe_update() -> None:
                 try:
                     # Double-check during execution
                     if (hasattr(self, 'root') and self.root.winfo_exists() and 
@@ -951,7 +951,7 @@ class MultitrackRecorderGUI:
         except Exception as e:
             pass  # Silently ignore callback errors during shutdown
     
-    def on_closing(self):
+    def on_closing(self) -> None:
         """Handle application closing"""
         # Set shutdown flag to prevent new callbacks
         self._shutting_down = True
@@ -984,7 +984,7 @@ class MultitrackRecorderGUI:
         except Exception as e:
             print(f"Error during shutdown: {e}")
 
-        def shutdown():
+        def shutdown() -> None:
             try:
                 # Step 5: Force update UI to ensure all changes are visible
                 self.root.update_idletasks()
@@ -1007,11 +1007,11 @@ class MultitrackRecorderGUI:
 
         self.root.after_idle(shutdown)
 
-    def run(self):
+    def run(self) -> None:
         """Start the GUI main loop"""
         self.root.mainloop()
 
-def main():
+def main() -> None:
     """Main entry point"""
     app = MultitrackRecorderGUI()
     app.run()

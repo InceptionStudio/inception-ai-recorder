@@ -4,7 +4,8 @@ import threading
 import queue
 import time
 import numpy as np
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Any
+from collections.abc import Mapping
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 import os
@@ -38,10 +39,10 @@ class GoogleDriveUploader:
         'https://www.googleapis.com/auth/drive'
     ]
     
-    def __init__(self):
-        self.service = None
-        self.credentials = None
-        self.folder_id = None
+    def __init__(self) -> None:
+        self.service: Any = None
+        self.credentials: Any = None
+        self.folder_id: str | None = None
         self._lock = threading.Lock()
     
     def authenticate(self, credentials_file: str = "credentials.json") -> bool:
@@ -55,8 +56,19 @@ class GoogleDriveUploader:
                         self.credentials = pickle.load(token)
                 
                 # If there are no (valid) credentials available, let the user log in.
-                if not self.credentials or not self.credentials.valid:
-                    if self.credentials and self.credentials.expired and self.credentials.refresh_token:
+                if not self.credentials:
+                    # No credentials at all, need to authenticate
+                    if not os.path.exists(credentials_file):
+                        print(f"❌ Google Drive credentials file '{credentials_file}' not found.")
+                        print("Please download your OAuth2 credentials from Google Cloud Console.")
+                        return False
+                    
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        credentials_file, self.SCOPES)
+                    self.credentials = flow.run_local_server(port=0)
+                elif not self.credentials.valid:
+                    # Have credentials but they're invalid
+                    if self.credentials.expired and self.credentials.refresh_token:
                         self.credentials.refresh(Request())
                     else:
                         if not os.path.exists(credentials_file):
@@ -80,7 +92,7 @@ class GoogleDriveUploader:
             print(f"❌ Google Drive authentication failed: {e}")
             return False
     
-    def set_folder_id(self, folder_id: str):
+    def set_folder_id(self, folder_id: str) -> None:
         """Set the Google Drive folder ID for uploads"""
         with self._lock:
             self.folder_id = folder_id
@@ -96,6 +108,8 @@ class GoogleDriveUploader:
         
         try:
             with self._lock:
+                if self.service is None:
+                    return False, "Google Drive service not initialized"
                 folder_info = self.service.files().get(
                     fileId=folder_id.strip(),
                     fields='id,name,mimeType',
@@ -121,7 +135,7 @@ class GoogleDriveUploader:
         with self._lock:
             return self.service is not None and self.credentials is not None
     
-    def clear_authentication(self):
+    def clear_authentication(self) -> None:
         """Clear authentication tokens (useful for re-authentication with new scopes)"""
         with self._lock:
             self.service = None
@@ -171,7 +185,7 @@ class GoogleDriveUploader:
                 
                 folder_id = folder.get('id')
                 print(f"📁 Created Google Drive folder: {folder_name} (ID: {folder_id})")
-                return folder_id
+                return str(folder_id) if folder_id else None
                 
         except Exception as e:
             print(f"❌ Failed to create Google Drive folder '{folder_name}': {e}")
@@ -180,6 +194,8 @@ class GoogleDriveUploader:
     def _find_folder_by_name(self, folder_name: str, parent_folder_id: str) -> Optional[str]:
         """Find a folder by name within a parent folder"""
         try:
+            if self.service is None:
+                return None
             # Search for folders with the exact name in the parent folder
             query = f"name='{folder_name}' and parents in '{parent_folder_id}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
             
@@ -191,7 +207,7 @@ class GoogleDriveUploader:
             
             folders = results.get('files', [])
             if folders:
-                return folders[0]['id']  # Return the first match
+                return str(folders[0]['id'])  # Return the first match
             
             return None
             
@@ -199,7 +215,7 @@ class GoogleDriveUploader:
             print(f"❌ Error searching for folder '{folder_name}': {e}")
             return None
 
-    def upload_file(self, file_path: str, file_name: Optional[str] = None, parent_folder_id: Optional[str] = None, settings_manager=None) -> bool:
+    def upload_file(self, file_path: str, file_name: Optional[str] = None, parent_folder_id: Optional[str] = None, settings_manager: Optional[SettingsManager] = None) -> bool:
         """Upload a file to Google Drive"""
         if not self.is_authenticated():
             print("❌ Not authenticated with Google Drive")
@@ -228,6 +244,9 @@ class GoogleDriveUploader:
                 
                 # First, verify the target folder exists and we have access
                 try:
+                    if self.service is None:
+                        print("❌ Google Drive service not initialized")
+                        return False
                     folder_info = self.service.files().get(
                         fileId=target_folder_id,
                         fields='id,name,mimeType',
@@ -280,7 +299,7 @@ class GoogleDriveUploader:
             print(f"❌ Failed to upload {file_path} to Google Drive: {e}")
             return False
     
-    def upload_files(self, file_paths: List[str], parent_folder_id: Optional[str] = None, settings_manager=None) -> Dict[str, bool]:
+    def upload_files(self, file_paths: List[str], parent_folder_id: Optional[str] = None, settings_manager: Optional[SettingsManager] = None) -> Dict[str, bool]:
         """Upload multiple files to Google Drive"""
         results = {}
         for file_path in file_paths:
@@ -294,8 +313,8 @@ class AudioManager:
     
     # Fields/methods that start with "__" should only be accessed when _lock is held
     # or during initialization.
-    def __init__(self, settings_manager: Optional[SettingsManager] = None):
-        self.__audio = pyaudio.PyAudio()
+    def __init__(self, settings_manager: Optional[SettingsManager] = None) -> None:
+        self.__audio: pyaudio.PyAudio | None = pyaudio.PyAudio()
         self.__input_devices: List[AudioDevice] = []
         self.__selected_devices: Dict[str, bool] = {}
         self.__listening_streams: Dict[str, pyaudio.Stream] = {}
@@ -351,7 +370,7 @@ class AudioManager:
         self.__load_device_settings()
         self.__load_selected_devices()
     
-    def __load_settings(self):
+    def __load_settings(self) -> None:
         """Load settings from settings manager"""
         try:
             # Load export directory
@@ -387,7 +406,7 @@ class AudioManager:
         except Exception as e:
             print(f"❌ Error loading settings: {e}")
     
-    def __load_device_settings(self):
+    def __load_device_settings(self) -> None:
         """Load device-specific settings (labels and gains) after remapping"""
         try:
             # Load device labels and gains after remapping has occurred
@@ -404,7 +423,7 @@ class AudioManager:
         except Exception as e:
             print(f"❌ Error loading device settings: {e}")
     
-    def __load_selected_devices(self):
+    def __load_selected_devices(self) -> None:
         """Load selected devices from settings"""
         try:
             last_used_devices = self.__settings_manager.get_last_used_devices()
@@ -416,7 +435,7 @@ class AudioManager:
         except Exception as e:
             print(f"❌ Error loading selected devices: {e}")
     
-    def __save_selected_devices(self):
+    def __save_selected_devices(self) -> None:
         """Save selected devices to settings"""
         try:
             selected_devices = [device_id for device_id, selected in self.__selected_devices.items() if selected]
@@ -424,10 +443,13 @@ class AudioManager:
         except Exception as e:
             print(f"❌ Error saving selected devices: {e}")
     
-    def __load_input_devices(self):
+    def __load_input_devices(self) -> None:
         """Load all available input audio devices"""
         # Assumed to be the only thread accessing this
         self.__input_devices.clear()
+        if self.__audio is None:
+            print("❌ PyAudio not initialized")
+            return
         device_count = self.__audio.get_device_count()
         
         for i in range(device_count):
@@ -435,23 +457,23 @@ class AudioManager:
                 device_info = self.__audio.get_device_info_by_index(i)
                 
                 # Only include input devices
-                if device_info['maxInputChannels'] > 0:
-                    host_api_info = self.__audio.get_host_api_info_by_index(device_info['hostApi'])
+                if int(device_info['maxInputChannels']) > 0:
+                    host_api_info = self.__audio.get_host_api_info_by_index(int(device_info['hostApi']))
                     print(f"🎤 {host_api_info['name']} Input Device Found: {device_info}")
                     
                     device = AudioDevice(
                         id=str(i),
-                        name=device_info['name'],
-                        host_api=host_api_info['name'],
-                        max_input_channels=device_info['maxInputChannels'],
-                        max_output_channels=device_info['maxOutputChannels'],
-                        default_low_input_latency=device_info['defaultLowInputLatency'],
-                        default_sample_rate=device_info['defaultSampleRate']
+                        name=str(device_info['name']),
+                        host_api=str(host_api_info['name']),
+                        max_input_channels=int(device_info['maxInputChannels']),
+                        max_output_channels=int(device_info['maxOutputChannels']),
+                        default_low_input_latency=float(device_info['defaultLowInputLatency']),
+                        default_sample_rate=float(device_info['defaultSampleRate'])
                     )
                     self.__input_devices.append(device)
                     self.__selected_devices[str(i)] = False
                     # Initialize peak tracking for new device
-                    self.__reset_device_peak_tracking(i)
+                    self.__reset_device_peak_tracking(str(i))
                     
             except Exception as e:
                 print(f"Error loading device {i}: {e}")
@@ -464,7 +486,7 @@ class AudioManager:
             current_devices[str(device.id)] = device.name
         self.__settings_manager.remap_device_ids(current_devices)
     
-    def refresh_devices(self):
+    def refresh_devices(self) -> None:
         """Refresh the list of available devices"""
         with self._lock:
             if self.__is_recording:
@@ -542,7 +564,7 @@ class AudioManager:
         with self._lock:
             return len(self.__input_devices)
     
-    def set_device_selected(self, device_id: str, selected: bool):
+    def set_device_selected(self, device_id: str, selected: bool) -> None:
         """Set device selection status"""
         should_stop = False
         
@@ -578,7 +600,7 @@ class AudioManager:
         """Get list of selected device IDs"""
         return [device_id for device_id, selected in self.__selected_devices.items() if selected]
 
-    def set_device_label(self, device_id: str, label: str):
+    def set_device_label(self, device_id: str, label: str) -> None:
         """Set custom label for device"""
         with self._lock:
             self.__device_labels[device_id] = label
@@ -595,7 +617,7 @@ class AudioManager:
         """Get custom label for device"""
         return self.__device_labels.get(device_id, "")
     
-    def clear_device_label(self, device_id: str):
+    def clear_device_label(self, device_id: str) -> None:
         """Clear custom label for device"""
         with self._lock:
             self.__device_labels.pop(device_id, None)
@@ -603,7 +625,7 @@ class AudioManager:
         # Save to settings
         self.__settings_manager.set_device_label(device_id, "")
     
-    def set_device_gain(self, device_id: str, gain_db: float):
+    def set_device_gain(self, device_id: str, gain_db: float) -> None:
         """Set gain for device in dB"""
         with self._lock:
             self.__device_gains[device_id] = gain_db
@@ -616,7 +638,7 @@ class AudioManager:
         with self._lock:
             return self.__device_gains.get(device_id, 0.0)
     
-    def __reset_device_peak_tracking(self, device_id: str):
+    def __reset_device_peak_tracking(self, device_id: str) -> None:
         """Reset peak tracking for a device"""
         self.__device_peak_levels[device_id] = 0.0
         self.__device_peak_counts[device_id] = 0
@@ -663,7 +685,7 @@ class AudioManager:
         
         return None
     
-    def set_export_directory(self, directory: str):
+    def set_export_directory(self, directory: str) -> None:
         """Set the export directory for recordings"""
         with self._lock:
             self.__export_directory = Path(directory)
@@ -678,7 +700,7 @@ class AudioManager:
         with self._lock:
             return self.__export_directory
     
-    def set_session_title(self, title: str):
+    def set_session_title(self, title: str) -> None:
         """Set the session title for recordings"""
         with self._lock:
             self.__session_title = title
@@ -724,7 +746,7 @@ class AudioManager:
         with self._lock:
             return self.__current_session_folder
     
-    def set_google_drive_enabled(self, enabled: bool):
+    def set_google_drive_enabled(self, enabled: bool) -> None:
         """Enable or disable Google Drive upload"""
         with self._lock:
             self.__upload_to_drive = enabled
@@ -783,7 +805,7 @@ class AudioManager:
             self.__settings_manager.set_google_drive_authenticated(False)
             return False
     
-    def set_google_drive_folder_id(self, folder_id: str):
+    def set_google_drive_folder_id(self, folder_id: str) -> None:
         """Set the Google Drive folder ID for uploads"""
         self.__drive_uploader.set_folder_id(folder_id)
         # Save to settings
@@ -801,33 +823,41 @@ class AudioManager:
         """Check if authenticated with Google Drive"""
         return self.__drive_uploader.is_authenticated()
     
-    def clear_google_drive_authentication(self):
+    def clear_google_drive_authentication(self) -> None:
         """Clear Google Drive authentication tokens"""
         self.__drive_uploader.clear_authentication()
         # Save authentication status
         self.__settings_manager.set_google_drive_authenticated(False)
+    
+    def get_google_drive_output_format(self) -> str:
+        """Get Google Drive output format"""
+        return self.__settings_manager.get_google_drive_output_format()
+    
+    def set_google_drive_output_format(self, output_format: str) -> None:
+        """Set Google Drive output format"""
+        self.__settings_manager.set_google_drive_output_format(output_format)
     
     def is_recording(self) -> bool:
         """Check if currently recording"""
         with self._lock:
             return self.__is_recording
     
-    def set_level_callback(self, callback: Callable[[str, float], None]):
+    def set_level_callback(self, callback: Callable[[str, float], None]) -> None:
         """Set callback for audio level updates"""
         with self._lock:
             self.__level_callback = callback
     
-    def set_waveform_callback(self, callback: Callable[[str, List[float]], None]):
+    def set_waveform_callback(self, callback: Callable[[str, List[float]], None]) -> None:
         """Set callback for waveform data updates"""
         with self._lock:
             self.__waveform_callback = callback
     
-    def _start_device_stream(self, device_id: str):
+    def _start_device_stream(self, device_id: str) -> None:
         """Start audio stream for a device"""
         with self._lock:
             self.__start_device_stream(device_id)
 
-    def __start_device_stream(self, device_id: str):
+    def __start_device_stream(self, device_id: str) -> None:
         """Start audio stream for a device"""
         if device_id in self.__listening_streams:
             return
@@ -850,17 +880,19 @@ class AudioManager:
             self.__audio_data_queues[device_id] = queue.Queue()
             
             # Create callback function
-            def audio_callback(in_data, frame_count, time_info, status):
+            def audio_callback(in_data: bytes | None, frame_count: int, time_info: Mapping[str, float], status: int) -> tuple[bytes | None, int]:
                 # This runs in a separate high-priority thread. Make sure it is highly
                 # efficient and there is no blocking code here.
                 if status:
                     print(f"Audio callback status: {status}")
                 
+                if in_data is None:
+                    return (None, pyaudio.paContinue)
                 # Copy bytes into a new numpy array
                 audio_data = np.frombuffer(in_data, dtype=np.float32).copy()
                 
                 # Enqueue all other operations in a background thread, so we can return immediately.
-                def _bg_audio_callback_ops():
+                def _bg_audio_callback_ops() -> None:
                     with self._lock:
                         if not self.__shutting_down and device_id in self.__listening_streams:
                             queue_ref = self.__audio_data_queues[device_id]
@@ -886,6 +918,9 @@ class AudioManager:
                 return (in_data, pyaudio.paContinue)
             
             # Open stream
+            if self.__audio is None:
+                print(f"❌ PyAudio not initialized for device {device_id}")
+                return
             stream = self.__audio.open(
                 format=self.__sample_format,
                 channels=self.__channels,
@@ -914,7 +949,7 @@ class AudioManager:
         except Exception as e:
             print(f"Failed to start stream for device {device_id}: {e}")
     
-    def __stop_device_stream(self, device_id: str) -> threading.Thread:
+    def __stop_device_stream(self, device_id: str) -> threading.Thread | None:
         if device_id not in self.__listening_streams:
             return None
         
@@ -957,7 +992,7 @@ class AudioManager:
         print(f"✅ Stopped device {device_id}")
         return thread
         
-    def _stop_device_stream(self, device_id: str):
+    def _stop_device_stream(self, device_id: str) -> None:
         """Stop audio stream for a device"""
         thread = None
         stream = None
@@ -981,11 +1016,11 @@ class AudioManager:
             else:
                 print(f"  ✅ Listening thread {device_id} exited")
     
-    def stop_all_streams(self):
+    def stop_all_streams(self) -> None:
         with self._lock:
             self.__stop_all_streams()
 
-    def __stop_all_streams(self):
+    def __stop_all_streams(self) -> None:
         """Stop all active streams"""
         if not self.__listening_streams:
             return
@@ -1013,7 +1048,7 @@ class AudioManager:
         
         print("✅ All streams stopped")
     
-    def start_recording(self):
+    def start_recording(self) -> None:
         """Start recording from all selected devices"""
         with self._lock:
             if not self.__export_directory:
@@ -1069,7 +1104,7 @@ class AudioManager:
         
         print("Recording started")
     
-    def stop_recording(self):
+    def stop_recording(self) -> None:
         """Stop recording and finalize files"""
         with self._lock:
             if not self.__is_recording:
@@ -1089,7 +1124,7 @@ class AudioManager:
         with self._lock:
             self.__current_session_folder = None
     
-    def _upload_recordings_to_drive(self):
+    def _upload_recordings_to_drive(self) -> None:
         """Upload recorded files to Google Drive"""
         try:
             if not self.__drive_uploader.is_authenticated():
@@ -1127,7 +1162,7 @@ class AudioManager:
                 print(f"🎵 {output_format.upper()} conversion enabled - files will be converted before upload")
             
             # Upload files in a background thread to avoid blocking
-            def upload_task():
+            def upload_task() -> None:
                 # Create a session folder in Google Drive
                 drive_session_folder_id = self.__drive_uploader.create_folder(session_folder_name)
                 
@@ -1172,7 +1207,7 @@ class AudioManager:
         except Exception as e:
             print(f"❌ Error during Google Drive upload: {e}")
     
-    def _listening_worker(self, device_id: str):
+    def _listening_worker(self, device_id: str) -> None:
         """Worker thread to handle listening on a specific device"""
         while True:
             wav_file = None
@@ -1247,7 +1282,7 @@ class AudioManager:
                     # Only submit to thread pool if not shutting down
                     if not self.__shutting_down:
                         # Run level_cb on the _callback_thread_pool
-                        def _level_cb_task():
+                        def _level_cb_task() -> None:
                             try:
                                 # Double-check shutdown state and callback validity
                                 if not self.__shutting_down and level_cb is not None:
@@ -1271,7 +1306,7 @@ class AudioManager:
                     # Only submit to thread pool if not shutting down
                     if not self.__shutting_down:
                         # Run waveform_cb on the _callback_thread_pool
-                        def _waveform_cb_task():
+                        def _waveform_cb_task() -> None:
                             try:
                                 # Double-check shutdown state and callback validity
                                 if not self.__shutting_down and waveform_cb is not None:
@@ -1313,7 +1348,7 @@ class AudioManager:
                         print(f"BGThread({device_id}): Error closing file: {e}")
             
     
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Cleanup resources"""
         print("🧹 Cleaning up AudioManager...")
         
@@ -1347,12 +1382,13 @@ class AudioManager:
         time.sleep(0.1)
         
         try:
-            self.__audio.terminate()
-            print("✅ AudioManager cleanup completed")
+            if self.__audio is not None:
+                self.__audio.terminate()
+                print("✅ AudioManager cleanup completed")
         except Exception as e:
             print(f"Error terminating PyAudio: {e}")
     
-    def convert_wav_to_format(self, wav_file_path: str, output_format: str, output_file_path: str = None, bitrate: int = 128) -> Optional[str]:
+    def convert_wav_to_format(self, wav_file_path: str, output_format: str, output_file_path: str | None = None, bitrate: int = 128) -> str | None:
         """Convert WAV file to specified format using ffmpeg
         
         Args:
@@ -1413,41 +1449,3 @@ class AudioManager:
             print(f"❌ Error converting WAV to {output_format.upper()}: {e}")
             return None
     
-    # Google Drive Settings Methods
-    def set_google_drive_enabled(self, enabled: bool):
-        """Set Google Drive upload enabled"""
-        self.__settings_manager.set_google_drive_enabled(enabled)
-    
-    def get_google_drive_enabled(self) -> bool:
-        """Get Google Drive upload enabled"""
-        return self.__settings_manager.get_google_drive_enabled()
-    
-    def set_google_drive_folder_id(self, folder_id: str):
-        """Set Google Drive folder ID"""
-        self.__settings_manager.set_google_drive_folder_id(folder_id)
-    
-    def get_google_drive_folder_id(self) -> str:
-        """Get Google Drive folder ID"""
-        return self.__settings_manager.get_google_drive_folder_id()
-    
-    def set_google_drive_output_format(self, output_format: str):
-        """Set Google Drive output format"""
-        self.__settings_manager.set_google_drive_output_format(output_format)
-    
-    def get_google_drive_output_format(self) -> str:
-        """Get Google Drive output format"""
-        return self.__settings_manager.get_google_drive_output_format()
-    
-    def is_google_drive_authenticated(self) -> bool:
-        """Check if Google Drive is authenticated"""
-        return self.__settings_manager.get_google_drive_authenticated()
-    
-    def validate_google_drive_folder_id(self, folder_id: str) -> tuple[bool, str]:
-        """Validate Google Drive folder ID"""
-        # TODO: Implement actual validation
-        return True, "Folder validation not implemented yet"
-    
-    def clear_google_drive_authentication(self):
-        """Clear Google Drive authentication"""
-        self.__settings_manager.set_google_drive_authenticated(False)
-        # TODO: Remove authentication tokens

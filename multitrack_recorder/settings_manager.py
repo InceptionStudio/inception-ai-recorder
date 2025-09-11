@@ -139,7 +139,7 @@ class SettingsManager:
     
     def get_google_drive_enabled(self) -> bool:
         """Get Google Drive enabled setting"""
-        return self.get_setting("google_drive.enabled", False)
+        return bool(self.get_setting("google_drive.enabled", False))
     
     def set_google_drive_enabled(self, enabled: bool) -> bool:
         """Set Google Drive enabled setting"""
@@ -147,7 +147,7 @@ class SettingsManager:
     
     def get_google_drive_folder_id(self) -> str:
         """Get Google Drive folder ID setting"""
-        return self.get_setting("google_drive.folder_id", "")
+        return str(self.get_setting("google_drive.folder_id", ""))
     
     def set_google_drive_folder_id(self, folder_id: str) -> bool:
         """Set Google Drive folder ID setting"""
@@ -155,7 +155,7 @@ class SettingsManager:
     
     def get_google_drive_authenticated(self) -> bool:
         """Get Google Drive authenticated setting"""
-        return self.get_setting("google_drive.authenticated", False)
+        return bool(self.get_setting("google_drive.authenticated", False))
     
     def set_google_drive_authenticated(self, authenticated: bool) -> bool:
         """Set Google Drive authenticated setting"""
@@ -163,7 +163,7 @@ class SettingsManager:
     
     def get_export_directory(self) -> str:
         """Get export directory setting"""
-        return self.get_setting("export_directory", "")
+        return str(self.get_setting("export_directory", ""))
     
     def set_export_directory(self, directory: str) -> bool:
         """Set export directory setting"""
@@ -171,7 +171,7 @@ class SettingsManager:
     
     def get_session_title(self) -> str:
         """Get session title setting"""
-        return self.get_setting("session_title", "")
+        return str(self.get_setting("session_title", ""))
     
     def set_session_title(self, title: str) -> bool:
         """Set session title setting"""
@@ -180,7 +180,7 @@ class SettingsManager:
     def get_device_label(self, device_id: str) -> str:
         """Get device label setting"""
         labels = self.get_setting("device_labels", {})
-        return labels.get(device_id, "")
+        return str(labels.get(device_id, ""))
     
     def set_device_label(self, device_id: str, label: str) -> bool:
         """Set device label setting"""
@@ -194,7 +194,7 @@ class SettingsManager:
     def get_device_gain(self, device_id: str) -> float:
         """Get device gain setting in dB"""
         gains = self.get_setting("device_gains", {})
-        return gains.get(device_id, 0.0)
+        return float(gains.get(device_id, 0.0))
     
     def set_device_gain(self, device_id: str, gain_db: float) -> bool:
         """Set device gain setting in dB"""
@@ -204,7 +204,7 @@ class SettingsManager:
     
     def get_last_used_devices(self) -> list:
         """Get last used device IDs"""
-        return self.get_setting("last_used_devices", [])
+        return list(self.get_setting("last_used_devices", []))
     
     def set_last_used_devices(self, device_ids: list) -> bool:
         """Set last used device IDs"""
@@ -212,49 +212,16 @@ class SettingsManager:
     
     def get_window_geometry(self) -> str:
         """Get window geometry setting"""
-        return self.get_setting("window_geometry", "900x600")
+        return str(self.get_setting("window_geometry", "900x600"))
     
     def set_window_geometry(self, geometry: str) -> bool:
         """Set window geometry setting"""
         return self.set_setting("window_geometry", geometry)
     
-    def get_google_drive_enabled(self) -> bool:
-        """Get Google Drive enabled setting"""
-        drive_settings = self.get_setting("google_drive", {})
-        return drive_settings.get("enabled", False)
-    
-    def set_google_drive_enabled(self, enabled: bool) -> bool:
-        """Set Google Drive enabled setting"""
-        drive_settings = self.get_setting("google_drive", {})
-        drive_settings["enabled"] = enabled
-        return self.set_setting("google_drive", drive_settings)
-    
-    def get_google_drive_folder_id(self) -> str:
-        """Get Google Drive folder ID setting"""
-        drive_settings = self.get_setting("google_drive", {})
-        return drive_settings.get("folder_id", "")
-    
-    def set_google_drive_folder_id(self, folder_id: str) -> bool:
-        """Set Google Drive folder ID setting"""
-        drive_settings = self.get_setting("google_drive", {})
-        drive_settings["folder_id"] = folder_id
-        return self.set_setting("google_drive", drive_settings)
-    
-    def get_google_drive_authenticated(self) -> bool:
-        """Get Google Drive authenticated setting"""
-        drive_settings = self.get_setting("google_drive", {})
-        return drive_settings.get("authenticated", False)
-    
-    def set_google_drive_authenticated(self, authenticated: bool) -> bool:
-        """Set Google Drive authenticated setting"""
-        drive_settings = self.get_setting("google_drive", {})
-        drive_settings["authenticated"] = authenticated
-        return self.set_setting("google_drive", drive_settings)
-    
     def get_google_drive_output_format(self) -> str:
         """Get Google Drive output format setting"""
         drive_settings = self.get_setting("google_drive", {})
-        return drive_settings.get("output_format", "opus")
+        return str(drive_settings.get("output_format", "opus"))
     
     def set_google_drive_output_format(self, output_format: str) -> bool:
         """Set Google Drive output format setting"""
@@ -276,7 +243,7 @@ class SettingsManager:
         with self._lock:
             return self.__settings.copy()
     
-    def set_auto_save(self, enabled: bool):
+    def set_auto_save(self, enabled: bool) -> None:
         """Enable or disable auto-save"""
         self._auto_save = enabled
     
@@ -284,7 +251,7 @@ class SettingsManager:
         """Force save settings regardless of auto-save setting"""
         return self.save_settings()
     
-    def mark_file_uploaded(self, file_path: str, file_size: int, file_mtime: float):
+    def mark_file_uploaded(self, file_path: str, file_size: int, file_mtime: float) -> None:
         """Mark a file as uploaded with its metadata"""
         with self._lock:
             uploaded_files = self.__settings.get("uploaded_files", {})
@@ -327,7 +294,7 @@ class SettingsManager:
                     self.__settings["uploaded_files"] = uploaded_files
                 return False
     
-    def clear_uploaded_files(self):
+    def clear_uploaded_files(self) -> None:
         """Clear all uploaded file tracking"""
         with self._lock:
             self.__settings["uploaded_files"] = {}
@@ -336,7 +303,8 @@ class SettingsManager:
     
     def get_device_mapping(self) -> Dict[str, str]:
         """Get device mapping (dict mapping id -> name)"""
-        return self.get_setting("device_mapping", {})
+        mapping = self.get_setting("device_mapping", {})
+        return {str(k): str(v) for k, v in mapping.items()}
     
     def set_device_mapping(self, mapping: Dict[str, str]) -> bool:
         """Set device mapping (dict mapping id -> name)"""
