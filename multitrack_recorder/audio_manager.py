@@ -1224,6 +1224,13 @@ class AudioManager:
                     # Apply gain and clip to prevent overflow (audio_data is already float32)
                     audio_data = np.clip(audio_data * gain_linear, -1.0, 1.0)
                 
+                # Validate audio data for invalid values (NaN, inf) after all processing
+                if np.any(np.isnan(audio_data)) or np.any(np.isinf(audio_data)):
+                    # Replace invalid values with zeros to prevent issues downstream
+                    audio_data = np.nan_to_num(audio_data, nan=0.0, posinf=1.0, neginf=-1.0)
+                    # Ensure values are still within valid range after replacement
+                    audio_data = np.clip(audio_data, -1.0, 1.0)
+                
                 # Process callbacks
                 level_cb = None
                 waveform_cb = None
@@ -1280,6 +1287,14 @@ class AudioManager:
                 if wav_file is not None:
                     # Convert float32 audio_data to 32-bit int for WAV file
                     # Scale float32 (-1.0 to 1.0) to int32 range
+                    
+                    # Check for and handle invalid values (NaN, inf) before casting
+                    if np.any(np.isnan(audio_data)) or np.any(np.isinf(audio_data)):
+                        # Replace invalid values with zeros to prevent cast warnings
+                        audio_data = np.nan_to_num(audio_data, nan=0.0, posinf=1.0, neginf=-1.0)
+                        # Ensure values are still within valid range after replacement
+                        audio_data = np.clip(audio_data, -1.0, 1.0)
+                    
                     int32_data = (audio_data * 2147483647).astype(np.int32)
                     wav_file.writeframes(int32_data.tobytes())
 
