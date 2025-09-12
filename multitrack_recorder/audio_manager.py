@@ -326,11 +326,19 @@ class AudioManager:
         self.__level_callback: Optional[Callable[[str, float], None]] = None
         self.__waveform_callback: Optional[Callable[[str, List[float]], None]] = None
         
-        # Listening settings
+        # Performance optimization: batch UI updates
+        self.__last_ui_update_time: Dict[str, float] = {}
+        self.__ui_update_interval = 0.05  # 20 FPS max for UI updates
+        self.__level_buffer: Dict[str, float] = {}  # Buffer latest level
+        self.__waveform_buffer: Dict[str, List[float]] = {}  # Buffer latest waveform
+        
+        # Listening settings - OPTIMIZED for better performance
         self.__sample_rate = 48000
         self.__channels = 1
         self.__sample_format = pyaudio.paFloat32
-        self.__chunk_size = 1024
+        # Performance: Larger chunk size reduces callback frequency and CPU overhead
+        # 2048 samples at 48kHz = ~43ms latency (acceptable for recording)
+        self.__chunk_size = 2048
         
         # Device labels
         self.__device_labels: Dict[str, str] = {}
@@ -362,8 +370,10 @@ class AudioManager:
         self.__is_recording = False
         self.__shutting_down = False
         self._lock = threading.Lock()
-        self._bg_thread_pool = ThreadPoolExecutor(max_workers=1)
-        self._callback_thread_pool = ThreadPoolExecutor(max_workers=2)
+        # Performance: Use more workers and separate pools for different tasks
+        self._bg_thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="audio_bg")
+        self._callback_thread_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ui_callback")
+        self._file_io_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="file_io")
         
         self.__load_input_devices()
         self.__load_settings()
@@ -879,42 +889,26 @@ class AudioManager:
             # Create audio data queue for this device
             self.__audio_data_queues[device_id] = queue.Queue()
             
-            # Create callback function
+            # Create callback function - OPTIMIZED for minimal latency
             def audio_callback(in_data: bytes | None, frame_count: int, time_info: Mapping[str, float], status: int) -> tuple[bytes | None, int]:
-                # This runs in a separate high-priority thread. Make sure it is highly
-                # efficient and there is no blocking code here.
-                if status:
-                    print(f"Audio callback status: {status}")
+                # This runs in a separate high-priority thread. Keep it MINIMAL.
+                if status or in_data is None or self.__shutting_down:
+                    return (None, pyaudio.paAbort if self.__shutting_down else pyaudio.paContinue)
                 
-                if in_data is None:
-                    return (None, pyaudio.paContinue)
-                # Copy bytes into a new numpy array
-                audio_data = np.frombuffer(in_data, dtype=np.float32).copy()
-                
-                # Enqueue all other operations in a background thread, so we can return immediately.
-                def _bg_audio_callback_ops() -> None:
-                    with self._lock:
-                        if not self.__shutting_down and device_id in self.__listening_streams:
-                            queue_ref = self.__audio_data_queues[device_id]
-                    
-                    # Queue audio data if needed (outside of lock to avoid deadlock)
-                    if queue_ref is not None:
+                # CRITICAL: No copying or numpy operations in callback - just enqueue raw bytes
+                queue_ref = self.__audio_data_queues.get(device_id)
+                if queue_ref is not None:
+                    try:
+                        # Queue raw bytes directly - no copying or processing
+                        queue_ref.put_nowait(in_data)
+                    except queue.Full:
+                        # Performance: Drop oldest data instead of newest
                         try:
-                            queue_ref.put_nowait(audio_data)
-                        except queue.Full:
-                            pass  # Drop data if queue is full
-
-                # Only submit to thread pool if not shutting down
-                if self.__shutting_down:
-                    print(f"Shutting down, returning paAbort")
-                    return (in_data, pyaudio.paAbort)
-                    
-                try:
-                    self._bg_thread_pool.submit(_bg_audio_callback_ops)
-                except RuntimeError:
-                    # Thread pool is shut down, ignore the error
-                    pass
-
+                            queue_ref.get_nowait()  # Drop oldest
+                            queue_ref.put_nowait(in_data)  # Add newest
+                        except queue.Empty:
+                            pass
+                
                 return (in_data, pyaudio.paContinue)
             
             # Open stream
@@ -1227,16 +1221,19 @@ class AudioManager:
                 gain_db = self.__device_gains.get(device_id, 0.0)
             
             try:
-                # Get audio data from queue with timeout
-                audio_data = audio_queue.get(timeout=2.0)
-                if audio_data is STOP:
+                # Get raw audio data from queue with timeout
+                raw_audio_data = audio_queue.get(timeout=2.0)
+                if raw_audio_data is STOP:
                     print(f"BGThread({device_id}): Exiting gracefully")
                     return
                 
+                # Convert bytes to numpy array once
+                audio_data = np.frombuffer(raw_audio_data, dtype=np.float32)
+                
                 # Track peak levels (before gain adjustment)
                 if not self.__shutting_down:
-                    # Calculate peak level in this chunk (audio_data is already float32)
-                    chunk_peak = np.max(np.abs(audio_data))
+                    # Use vectorized operations for better performance
+                    chunk_peak = np.abs(audio_data).max()  # Faster than np.max(np.abs())
                     
                     # Update peak tracking
                     with self._lock:
@@ -1266,72 +1263,87 @@ class AudioManager:
                     # Ensure values are still within valid range after replacement
                     audio_data = np.clip(audio_data, -1.0, 1.0)
                 
-                # Process callbacks
-                level_cb = None
-                waveform_cb = None
-                with self._lock:
-                    if not self.__shutting_down and device_id in self.__listening_streams:
-                        level_cb = self.__level_callback
-                        waveform_cb = self.__waveform_callback
-
-                if level_cb and not self.__shutting_down:
-                    # Calculate RMS level (audio_data is already float32 normalized to -1.0 to 1.0)
-                    rms = np.sqrt(np.mean(audio_data**2))
+                # PERFORMANCE: Batch UI updates to reduce overhead
+                current_time = time.time()
+                should_update_ui = current_time - self.__last_ui_update_time.get(device_id, 0) > self.__ui_update_interval
+                
+                if should_update_ui and not self.__shutting_down:
+                    # Calculate RMS level efficiently
+                    rms = np.sqrt(np.mean(np.square(audio_data)))  # More efficient
                     scaled_rms = min(1.0, rms)
-
-                    # Only submit to thread pool if not shutting down
+                    
+                    # Store in buffers instead of immediate callbacks
+                    with self._lock:
+                        if device_id in self.__listening_streams:
+                            self.__level_buffer[device_id] = scaled_rms
+                            
+                            # Downsample waveform efficiently (only when needed)
+                            if len(audio_data) > 100:
+                                downsample_factor = len(audio_data) // 100
+                                downsampled = audio_data[::downsample_factor].tolist()
+                            else:
+                                downsampled = audio_data.tolist()
+                            
+                            self.__waveform_buffer[device_id] = downsampled
+                            self.__last_ui_update_time[device_id] = current_time
+                    
+                    # Single batched UI update
                     if not self.__shutting_down:
-                        # Run level_cb on the _callback_thread_pool
-                        def _level_cb_task() -> None:
+                        def _batched_ui_update() -> None:
                             try:
-                                # Double-check shutdown state and callback validity
-                                if not self.__shutting_down and level_cb is not None:
-                                    level_cb(device_id, scaled_rms)
+                                level_cb = None
+                                waveform_cb = None
+                                buffered_level = None
+                                buffered_waveform = None
+                                
+                                with self._lock:
+                                    if not self.__shutting_down and device_id in self.__listening_streams:
+                                        level_cb = self.__level_callback
+                                        waveform_cb = self.__waveform_callback
+                                        buffered_level = self.__level_buffer.get(device_id)
+                                        buffered_waveform = self.__waveform_buffer.get(device_id)
+                                
+                                # Execute callbacks outside lock
+                                if level_cb and buffered_level is not None:
+                                    level_cb(device_id, buffered_level)
+                                if waveform_cb and buffered_waveform is not None:
+                                    waveform_cb(device_id, buffered_waveform)
+                                    
                             except Exception as e:
-                                print(f"BGThread({device_id}): Error during level callback: {e}")
+                                print(f"BGThread({device_id}): Error during UI update: {e}")
+                        
                         try:
-                            self._callback_thread_pool.submit(_level_cb_task)
+                            self._callback_thread_pool.submit(_batched_ui_update)
                         except RuntimeError:
-                            # Thread pool is shut down, ignore the error
-                            pass
-
-                if waveform_cb and not self.__shutting_down:
-                    # Update waveform data (downsample for display)
-                    downsample_factor = max(1, len(audio_data) // 100)
-                    downsampled = audio_data[::downsample_factor]
-
-                    # Scale to -1.0 to 1.0 range for display
-                    scaled_waveform = downsampled.tolist()
-
-                    # Only submit to thread pool if not shutting down
-                    if not self.__shutting_down:
-                        # Run waveform_cb on the _callback_thread_pool
-                        def _waveform_cb_task() -> None:
-                            try:
-                                # Double-check shutdown state and callback validity
-                                if not self.__shutting_down and waveform_cb is not None:
-                                    waveform_cb(device_id, scaled_waveform)
-                            except Exception as e:
-                                print(f"BGThread({device_id}): Error during waveform callback: {e}")
-                        try:
-                            self._callback_thread_pool.submit(_waveform_cb_task)
-                        except RuntimeError:
-                            # Thread pool is shut down, ignore the error
-                            pass
+                            pass  # Thread pool shut down
 
                 if wav_file is not None:
-                    # Convert float32 audio_data to 32-bit int for WAV file
-                    # Scale float32 (-1.0 to 1.0) to int32 range
+                    # PERFORMANCE: Offload file I/O to separate thread pool to prevent blocking
+                    audio_data_copy = audio_data.copy()  # Make copy for async processing
                     
-                    # Check for and handle invalid values (NaN, inf) before casting
-                    if np.any(np.isnan(audio_data)) or np.any(np.isinf(audio_data)):
-                        # Replace invalid values with zeros to prevent cast warnings
-                        audio_data = np.nan_to_num(audio_data, nan=0.0, posinf=1.0, neginf=-1.0)
-                        # Ensure values are still within valid range after replacement
-                        audio_data = np.clip(audio_data, -1.0, 1.0)
+                    def _write_audio_file() -> None:
+                        try:
+                            # Convert float32 to 32-bit int efficiently
+                            if np.any(np.isnan(audio_data_copy)) or np.any(np.isinf(audio_data_copy)):
+                                # Handle invalid values
+                                clean_data = np.nan_to_num(audio_data_copy, nan=0.0, posinf=1.0, neginf=-1.0)
+                                clean_data = np.clip(clean_data, -1.0, 1.0)
+                            else:
+                                clean_data = audio_data_copy
+                            
+                            # Efficient conversion using vectorized operations
+                            int32_data = (clean_data * 2147483647).astype(np.int32)
+                            wav_file.writeframes(int32_data.tobytes())
+                        except Exception as e:
+                            print(f"BGThread({device_id}): File write error: {e}")
                     
-                    int32_data = (audio_data * 2147483647).astype(np.int32)
-                    wav_file.writeframes(int32_data.tobytes())
+                    try:
+                        self._file_io_pool.submit(_write_audio_file)
+                    except RuntimeError:
+                        # Fallback: write synchronously if thread pool is shut down
+                        clean_data = np.clip(np.nan_to_num(audio_data, nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0)
+                        int32_data = (clean_data * 2147483647).astype(np.int32)
+                        wav_file.writeframes(int32_data.tobytes())
 
             except queue.Empty:
                 continue  # No data available, keep trying
@@ -1359,9 +1371,10 @@ class AudioManager:
         # Shutdown thread pools without waiting to prevent deadlock
         try:
             print("🔄 Shutting down thread pools...")
-            # Shutdown thread pools without waiting to prevent deadlock
+            # Shutdown all thread pools
             self._callback_thread_pool.shutdown(wait=False)
             self._bg_thread_pool.shutdown(wait=False)
+            self._file_io_pool.shutdown(wait=False)
             print("✅ Thread pools shutdown requested")
         except Exception as e:
             print(f"Error shutting down thread pools: {e}")

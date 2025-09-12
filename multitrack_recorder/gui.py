@@ -10,6 +10,7 @@ import threading
 import signal
 import sys
 import os
+import time
 from typing import Dict, List, Any
 from .audio_manager import AudioManager, AudioDevice
 from .settings_manager import SettingsManager
@@ -58,15 +59,28 @@ class WaveformWidget:
         self.update_level(0.0)
     
     def update_waveform(self, data: List[float]) -> None:
-        """Update waveform display"""
-        if data:
-            x_data = np.linspace(0, 100, len(data))
-            self.line.set_data(x_data, data)
-        else:
-            # Show flat line when no data
-            self.line.set_data([0, 100], [0, 0])
+        """Update waveform display - OPTIMIZED to reduce matplotlib overhead"""
+        if not hasattr(self, '_last_update_time'):
+            self._last_update_time = 0
+        
+        # Performance: Limit waveform updates to 15 FPS max
+        current_time = time.time()
+        if current_time - self._last_update_time < 0.067:  # 1/15 second
+            return
+        
+        self._last_update_time = current_time
         
         try:
+            if data:
+                # Performance: Reuse x_data array and limit points
+                if not hasattr(self, '_x_data') or len(self._x_data) != len(data):
+                    self._x_data = np.linspace(0, 100, len(data))
+                self.line.set_data(self._x_data, data)
+            else:
+                # Show flat line when no data
+                self.line.set_data([0, 100], [0, 0])
+            
+            # Use draw_idle for better performance
             self.canvas.draw_idle()
         except:
             pass  # Ignore drawing errors
@@ -912,42 +926,38 @@ class MultitrackRecorderGUI:
                 messagebox.showerror("Error", f"Failed to start recording: {e}")
     
     def on_level_update(self, device_id: str, level: float) -> None:
-        """Handle audio level updates"""
+        """Handle audio level updates - OPTIMIZED for batch processing"""
         # Check if we're shutting down or if root window is being destroyed
         try:
             if self._shutting_down or not hasattr(self, 'root') or not self.root.winfo_exists():
                 return
+            
+            # Performance: Direct update without after_idle for level meters (they're fast)
+            if device_id in self.device_rows:
+                self.device_rows[device_id].waveform_widget.update_level(level)
                 
-            def safe_update() -> None:
-                try:
-                    # Double-check during execution
-                    if (hasattr(self, 'root') and self.root.winfo_exists() and 
-                        device_id in self.device_rows):
-                        self.device_rows[device_id].waveform_widget.update_level(level)
-                except Exception as e:
-                    pass  # Silently ignore UI update errors during shutdown
-                
-            self.root.after_idle(safe_update)
         except Exception as e:
             pass  # Silently ignore callback errors during shutdown
     
     def on_waveform_update(self, device_id: str, waveform: List[float]) -> None:
-        """Handle waveform data updates"""
+        """Handle waveform data updates - OPTIMIZED with rate limiting"""
         # Check if we're shutting down or if root window is being destroyed
         try:
             if self._shutting_down or not hasattr(self, 'root') or not self.root.winfo_exists():
                 return
-                
+            
+            # Performance: Use after_idle for waveform updates (they're expensive)
             def safe_update() -> None:
                 try:
-                    # Double-check during execution
                     if (hasattr(self, 'root') and self.root.winfo_exists() and 
                         device_id in self.device_rows):
                         self.device_rows[device_id].waveform_widget.update_waveform(waveform)
                 except Exception as e:
                     pass  # Silently ignore UI update errors during shutdown
             
+            # Schedule update when UI is idle to prevent overwhelming the GUI thread
             self.root.after_idle(safe_update)
+            
         except Exception as e:
             pass  # Silently ignore callback errors during shutdown
     
