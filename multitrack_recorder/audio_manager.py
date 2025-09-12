@@ -328,7 +328,7 @@ class AudioManager:
         
         # Performance optimization: batch UI updates
         self.__last_ui_update_time: Dict[str, float] = {}
-        self.__ui_update_interval = 0.05  # 20 FPS max for UI updates
+        self.__ui_update_interval = 0.1  # 10 FPS max for UI updates (reduce GUI overhead)
         self.__level_buffer: Dict[str, float] = {}  # Buffer latest level
         self.__waveform_buffer: Dict[str, List[float]] = {}  # Buffer latest waveform
         

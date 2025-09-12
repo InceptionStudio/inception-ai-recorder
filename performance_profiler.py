@@ -9,6 +9,7 @@ import threading
 from typing import Dict, List
 import os
 from dataclasses import dataclass
+import psutil
 
 @dataclass  
 class PerformanceMetrics:
@@ -26,6 +27,7 @@ class PerformanceProfiler:
         self.metrics: List[PerformanceMetrics] = []
         self.running = False
         self.thread = None
+        self.process = psutil.Process()
         
         # Counters for callbacks
         self.audio_callback_count = 0
@@ -65,14 +67,14 @@ class PerformanceProfiler:
                 current_time = time.time()
                 time_delta = current_time - last_time
                 
-                # Get basic system metrics (simplified)
-                cpu_percent = 0.0  # Will be updated by actual measurements if available
-                memory_mb = 0.0    # Simplified version
-                thread_count = threading.active_count()
+                # Get detailed system metrics
+                cpu_percent = self.process.cpu_percent()
+                memory_mb = self.process.memory_info().rss / (1024 * 1024)
+                thread_count = self.process.num_threads()
                 
                 # Calculate callback rates
-                audio_rate = (self.audio_callback_count - self.last_callback_count) / time_delta
-                gui_rate = (self.gui_update_count - self.last_gui_count) / time_delta
+                audio_rate = (self.audio_callback_count - self.last_callback_count) / time_delta if time_delta > 0 else 0
+                gui_rate = (self.gui_update_count - self.last_gui_count) / time_delta if time_delta > 0 else 0
                 
                 # Store metrics
                 metrics = PerformanceMetrics(

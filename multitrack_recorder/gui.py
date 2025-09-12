@@ -63,9 +63,9 @@ class WaveformWidget:
         if not hasattr(self, '_last_update_time'):
             self._last_update_time = 0
         
-        # Performance: Limit waveform updates to 15 FPS max
+        # Performance: Limit waveform updates to 10 FPS max to reduce GUI overhead
         current_time = time.time()
-        if current_time - self._last_update_time < 0.067:  # 1/15 second
+        if current_time - self._last_update_time < 0.1:  # 1/10 second = 10 FPS
             return
         
         self._last_update_time = current_time
