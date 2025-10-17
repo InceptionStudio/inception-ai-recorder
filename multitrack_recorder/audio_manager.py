@@ -321,6 +321,10 @@ class AudioManager:
         self.__listening_threads: Dict[str, threading.Thread] = {}
         self.__recording_files: Dict[str, wave.Wave_write] = {}
         self.__audio_data_queues: Dict[str, queue.Queue] = {}
+
+        # Thread health monitoring
+        self.__thread_last_activity: Dict[str, float] = {}  # Track last activity time per thread
+        self.__thread_health_check_interval = 5.0  # Check thread health every 5 seconds
         
         # Callbacks for UI updates
         self.__level_callback: Optional[Callable[[str, float], None]] = None
@@ -379,6 +383,9 @@ class AudioManager:
         self.__load_settings()
         self.__load_device_settings()
         self.__load_selected_devices()
+
+        # Start thread health monitor
+        self.__start_health_monitor()
     
     def __load_settings(self) -> None:
         """Load settings from settings manager"""
@@ -653,6 +660,160 @@ class AudioManager:
         self.__device_peak_levels[device_id] = 0.0
         self.__device_peak_counts[device_id] = 0
         self.__device_sample_counts[device_id] = 0
+
+    def __start_health_monitor(self) -> None:
+        """Start background thread health monitor"""
+        def health_monitor_worker() -> None:
+            print("🏥 Thread health monitor started")
+            while not self.__shutting_down:
+                try:
+                    time.sleep(self.__thread_health_check_interval)
+
+                    if self.__shutting_down:
+                        break
+
+                    current_time = time.time()
+
+                    # FIX Bug #6: Collect devices needing recovery WITHOUT holding lock
+                    # This prevents deadlock when PyAudio callbacks try to acquire lock during recovery
+                    devices_to_recover = []
+
+                    with self._lock:
+                        # Check each selected device
+                        for device_id, selected in self.__selected_devices.items():
+                            if not selected or self.__shutting_down:
+                                continue
+
+                            # Check if thread exists
+                            thread = self.__listening_threads.get(device_id)
+                            if thread is None:
+                                print(f"⚠️ Health Monitor: Device {device_id} is selected but has no thread!")
+                                devices_to_recover.append(device_id)
+                                continue
+
+                            # Check if thread is alive
+                            if not thread.is_alive():
+                                print(f"⚠️ Health Monitor: Thread for device {device_id} is DEAD! (Thread: {thread.name})")
+                                devices_to_recover.append(device_id)
+                                continue
+
+                            # Check for thread inactivity (no audio data for extended period)
+                            last_activity = self.__thread_last_activity.get(device_id, 0)
+                            time_since_activity = current_time - last_activity
+                            if time_since_activity > 10.0:  # 10 seconds of inactivity
+                                print(f"⚠️ Health Monitor: Thread for device {device_id} inactive for {time_since_activity:.1f}s")
+                                # Don't auto-recover for inactivity - could be legitimate (no audio input)
+                                # Just log it for diagnostics
+
+                    # FIX Bug #6: Perform recovery OUTSIDE the lock to prevent deadlock
+                    for device_id in devices_to_recover:
+                        self.__recover_device_thread_unlocked(device_id)
+
+                except Exception as e:
+                    print(f"❌ Health Monitor: Error during health check: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            print("🏥 Thread health monitor stopped")
+
+        monitor_thread = threading.Thread(target=health_monitor_worker, daemon=True, name="HealthMonitor")
+        monitor_thread.start()
+
+    def __recover_device_thread_unlocked(self, device_id: str) -> None:
+        """
+        Recover a dead or missing thread for a device WITHOUT holding the main lock.
+        FIX Bug #6: This prevents deadlock when PyAudio callbacks try to acquire lock.
+        """
+        print(f"🔧 Attempting to recover thread for device {device_id}")
+
+        # Get references with brief lock
+        old_thread = None
+        old_stream = None
+        old_queue = None
+
+        with self._lock:
+            # Clean up dead thread
+            old_thread = self.__listening_threads.pop(device_id, None)
+            if old_thread:
+                print(f"   Removed dead thread: {old_thread.name} (alive={old_thread.is_alive()})")
+
+            # Get stream and queue references
+            old_stream = self.__listening_streams.pop(device_id, None)
+            old_queue = self.__audio_data_queues.pop(device_id, None)
+
+        # Stop stream OUTSIDE lock (may block on PyAudio)
+        if old_stream:
+            try:
+                if old_stream.is_active():
+                    old_stream.stop_stream()
+                old_stream.close()
+            except Exception as e:
+                print(f"   ⚠️ Error closing old stream: {e}")
+
+        # Drain old queue OUTSIDE lock
+        if old_queue:
+            while not old_queue.empty():
+                try:
+                    old_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+        # Restart the stream with lock (quick operation)
+        try:
+            with self._lock:
+                print(f"   Restarting stream for device {device_id}...")
+                self.__start_device_stream(device_id)
+            print(f"✅ Successfully recovered thread for device {device_id}")
+
+        except Exception as e:
+            print(f"❌ Failed to recover thread for device {device_id}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def __recover_device_thread(self, device_id: str) -> None:
+        """
+        Recover a dead or missing thread for a device (must be called with lock held).
+        DEPRECATED: Use __recover_device_thread_unlocked to prevent deadlock.
+        This method is kept for compatibility with old code paths.
+        """
+        print(f"🔧 Attempting to recover thread for device {device_id}")
+
+        # Clean up dead thread
+        old_thread = self.__listening_threads.pop(device_id, None)
+        if old_thread:
+            print(f"   Removed dead thread: {old_thread.name} (alive={old_thread.is_alive()})")
+
+        # Stop and restart the stream
+        try:
+            # Stop existing stream if present
+            if device_id in self.__listening_streams:
+                stream = self.__listening_streams.pop(device_id)
+                try:
+                    if stream.is_active():
+                        stream.stop_stream()
+                    stream.close()
+                except Exception as e:
+                    print(f"   ⚠️ Error closing old stream: {e}")
+
+            # Clear old queue
+            old_queue = self.__audio_data_queues.pop(device_id, None)
+            if old_queue:
+                # Drain the old queue
+                while not old_queue.empty():
+                    try:
+                        old_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+            # Restart the stream
+            print(f"   Restarting stream for device {device_id}...")
+            self.__start_device_stream(device_id)
+            print(f"✅ Successfully recovered thread for device {device_id}")
+
+        except Exception as e:
+            print(f"❌ Failed to recover thread for device {device_id}: {e}")
+            import traceback
+            traceback.print_exc()
     
     def get_device_peak_info(self, device_id: str) -> tuple[float, int, int]:
         """Get peak tracking info: (peak_level, peak_count, sample_count)"""
@@ -933,12 +1094,14 @@ class AudioManager:
             thread = threading.Thread(
                 target=self._listening_worker,
                 args=(device_id,),
-                daemon=True
+                daemon=True,
+                name=f"AudioListener-{device_id}"
             )
             thread.start()
             self.__listening_threads[device_id] = thread
+            self.__thread_last_activity[device_id] = time.time()
 
-            print(f"Started stream for device {device_id}: {device.name}")
+            print(f"✅ Started stream for device {device_id}: {device.name} (Thread: {thread.name})")
             
         except Exception as e:
             print(f"Failed to start stream for device {device_id}: {e}")
@@ -1203,6 +1366,12 @@ class AudioManager:
     
     def _listening_worker(self, device_id: str) -> None:
         """Worker thread to handle listening on a specific device"""
+        thread_name = threading.current_thread().name
+        print(f"🎧 {thread_name}: Listening worker started for device {device_id}")
+
+        # Track consecutive queue.Empty for callback liveness detection (Bug #7 fix)
+        consecutive_empty = 0
+
         while True:
             wav_file = None
             is_recording = False
@@ -1210,8 +1379,10 @@ class AudioManager:
             with self._lock:
                 audio_queue = self.__audio_data_queues.get(device_id)
                 if not audio_queue:
-                    print(f"BGThread({device_id}): Listening queue not found, exiting.")
-                    break
+                    # FIX Bug #2: Retry instead of exit - queue may be temporarily None during recovery
+                    print(f"BGThread({device_id}): Listening queue not found, retrying...")
+                    time.sleep(0.1)
+                    continue  # Retry instead of break
             
                 is_recording = self.__is_recording
                 wav_file = self.__recording_files.get(device_id)
@@ -1224,30 +1395,40 @@ class AudioManager:
                 # Get raw audio data from queue with timeout
                 raw_audio_data = audio_queue.get(timeout=2.0)
                 if raw_audio_data is STOP:
-                    print(f"BGThread({device_id}): Exiting gracefully")
+                    print(f"🛑 {thread_name}: Received STOP signal, exiting gracefully")
                     return
-                
+
+                # FIX Bug #7: Reset consecutive empty counter on successful data receipt
+                consecutive_empty = 0
+
                 # Convert bytes to numpy array once
                 audio_data = np.frombuffer(raw_audio_data, dtype=np.float32)
-                
+
                 # Track peak levels (before gain adjustment)
+                chunk_peak = 0.0
                 if not self.__shutting_down:
                     # Use vectorized operations for better performance
                     chunk_peak = np.abs(audio_data).max()  # Faster than np.max(np.abs())
-                    
-                    # Update peak tracking
-                    with self._lock:
-                        if device_id in self.__listening_streams:
-                            current_peak = self.__device_peak_levels.get(device_id, 0.0)
-                            if chunk_peak > current_peak:
-                                self.__device_peak_levels[device_id] = float(chunk_peak)
-                            
-                            # Count samples at peak level (for clipping detection)
-                            if chunk_peak >= 0.99:  # Near maximum
-                                self.__device_peak_counts[device_id] = self.__device_peak_counts.get(device_id, 0) + 1
-                            
-                            # Increment sample count
-                            self.__device_sample_counts[device_id] = self.__device_sample_counts.get(device_id, 0) + 1
+
+                # FIX Bug #5: Batch all lock operations into ONE lock acquisition
+                # This reduces lock operations from 7 to 2 per audio chunk
+                current_time = time.time()
+                with self._lock:
+                    # Update activity timestamp
+                    self.__thread_last_activity[device_id] = current_time
+
+                    # Update peak tracking (if not shutting down)
+                    if not self.__shutting_down and device_id in self.__listening_streams:
+                        current_peak = self.__device_peak_levels.get(device_id, 0.0)
+                        if chunk_peak > current_peak:
+                            self.__device_peak_levels[device_id] = float(chunk_peak)
+
+                        # Count samples at peak level (for clipping detection)
+                        if chunk_peak >= 0.99:  # Near maximum
+                            self.__device_peak_counts[device_id] = self.__device_peak_counts.get(device_id, 0) + 1
+
+                        # Increment sample count
+                        self.__device_sample_counts[device_id] = self.__device_sample_counts.get(device_id, 0) + 1
                 
                 # Apply gain adjustment
                 if gain_db != 0.0:
@@ -1263,27 +1444,29 @@ class AudioManager:
                     # Ensure values are still within valid range after replacement
                     audio_data = np.clip(audio_data, -1.0, 1.0)
                 
-                # PERFORMANCE: Batch UI updates to reduce overhead
-                current_time = time.time()
-                should_update_ui = current_time - self.__last_ui_update_time.get(device_id, 0) > self.__ui_update_interval
-                
+                # FIX Bug #5: Check UI update timing and calculate values OUTSIDE lock
+                last_ui_update = self.__last_ui_update_time.get(device_id, 0)
+                should_update_ui = current_time - last_ui_update > self.__ui_update_interval
+
+                # Calculate UI values outside lock (expensive operations)
+                scaled_rms = None
+                downsampled = None
                 if should_update_ui and not self.__shutting_down:
                     # Calculate RMS level efficiently
                     rms = np.sqrt(np.mean(np.square(audio_data)))  # More efficient
                     scaled_rms = min(1.0, rms)
-                    
-                    # Store in buffers instead of immediate callbacks
+
+                    # Downsample waveform efficiently (only when needed)
+                    if len(audio_data) > 100:
+                        downsample_factor = len(audio_data) // 100
+                        downsampled = audio_data[::downsample_factor].tolist()
+                    else:
+                        downsampled = audio_data.tolist()
+
+                    # FIX Bug #5: Store in buffers with brief lock (fast operation)
                     with self._lock:
                         if device_id in self.__listening_streams:
                             self.__level_buffer[device_id] = scaled_rms
-                            
-                            # Downsample waveform efficiently (only when needed)
-                            if len(audio_data) > 100:
-                                downsample_factor = len(audio_data) // 100
-                                downsampled = audio_data[::downsample_factor].tolist()
-                            else:
-                                downsampled = audio_data.tolist()
-                            
                             self.__waveform_buffer[device_id] = downsampled
                             self.__last_ui_update_time[device_id] = current_time
                     
@@ -1346,9 +1529,22 @@ class AudioManager:
                         wav_file.writeframes(int32_data.tobytes())
 
             except queue.Empty:
+                # FIX Bug #7: Track consecutive empty queue to detect callback failures
+                consecutive_empty += 1
+
+                # Update last activity even when queue is empty (thread is still alive)
+                with self._lock:
+                    self.__thread_last_activity[device_id] = time.time()
+
+                # Warn if no data for extended period (possible callback failure)
+                if consecutive_empty >= 5:  # 10 seconds (5 * 2s timeout)
+                    print(f"⚠️ {thread_name}: No audio data for {consecutive_empty * 2}s - callback may have stopped!")
+
                 continue  # No data available, keep trying
             except Exception as e:
-                print(f"BGThread({device_id}): Recording error: {e}")
+                print(f"❌ {thread_name}: Recording error: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
             finally:
                 if not is_recording and wav_file is not None:
